@@ -20,7 +20,7 @@ A cada inicialização o `.bat` verifica tudo de que o visualizador precisa:
 |---|---|
 | **Node.js** (obrigatório) | Se faltar ou estiver abaixo da versão mínima, baixa o instalador oficial de nodejs.org, confere a assinatura (SHA-256 e assinatura digital da OpenJS Foundation) e instala. Uma vez por dia, atualiza para a versão LTS mais recente. |
 | **Google Chrome** | Se faltar, instala pelo `winget`. Ele se atualiza sozinho. Sem ele, o visualizador abre no navegador padrão. |
-| **Pacotes npm** (`package.json`) | Instalados sempre que a lista muda (ou se a pasta `node_modules` sumir) e atualizados uma vez por dia. Hoje não há nenhum. |
+| **Pacotes npm** (`package.json`) | Instalados sempre que a lista muda (ou se a pasta `node_modules` sumir) e atualizados uma vez por dia. Hoje há um, opcional: o **sharp**, que gera as miniaturas (veja [Velocidade das miniaturas](#velocidade-das-miniaturas)). Se ele não puder ser instalado, o visualizador abre do mesmo jeito, só que mais lento. |
 
 - Instalações podem pedir permissão do Windows: clique em **Sim**.
 - Sem internet, ele segue com o que já está instalado e tenta atualizar na próxima vez.
@@ -97,6 +97,46 @@ Somente pastas, **imagens** e **vídeos** aparecem; os demais arquivos são igno
 
 HEIC, TIFF, AVI, WMV, FLV, MPEG, 3GP e MTS também aparecem na lista, mas o Chrome não consegue
 exibi-los; para esses, o visualizador oferece **Abrir no aplicativo padrão** do Windows.
+(TIFF ganha miniatura na grade quando o sharp está instalado.)
+
+## Velocidade das miniaturas
+
+As miniaturas das imagens são feitas pelo próprio servidor, com o pacote **sharp** (instalado
+automaticamente), e guardadas em disco. Assim o navegador recebe cerca de 20 KB por foto, em vez
+do arquivo original inteiro (3 a 10 MB numa foto de celular). O original só é baixado quando você
+abre o arquivo.
+
+- **Pré-carregamento:** ao abrir uma pasta, o servidor já prepara, em segundo plano, as capas das
+  subpastas, as miniaturas da pasta e as primeiras imagens de cada subpasta. Entrar numa subpasta
+  passa a ser imediato. Abrir outra pasta interrompe o preparo da anterior.
+- **Cache:** fica em `%LOCALAPPDATA%\VisualizadorDePastas\miniaturas` e vale para qualquer
+  navegador ou computador que acesse o visualizador. As mais antigas são apagadas sozinhas acima
+  de 2 GB. Pode apagar a pasta à vontade: as miniaturas são refeitas quando forem necessárias.
+- A janela preta informa se as miniaturas rápidas estão ativas. Sem o sharp (por exemplo, sem
+  internet na primeira abertura), o navegador faz as miniaturas a partir dos originais, como
+  antes. Funciona, mas é bem mais lento, principalmente pelo Tailscale.
+- Vídeos, BMP, ICO e HEIC continuam com a miniatura feita pelo navegador.
+
+Medição com 600 fotos de 12 MP (2,9 MB cada), num computador de teste com 4 núcleos, contando o
+tempo até a primeira tela ficar completa:
+
+| | Antes | Agora, 1ª vez | Agora, já em cache |
+|---|---|---|---|
+| Pasta com 30 subpastas (capas) | 5,1 s | 1,6 s | 0,7 s |
+| Pasta com 150 fotos | 2,0 s | 0,8 s | 0,9 s |
+| Entrar numa subpasta | 7,3 s | 0,6 s | 0,2 s |
+| Os mesmos três, numa conexão de 25 Mbit/s (como pelo Tailscale) | 52 s / 17 s / 94 s | 1,9 s / 1,1 s / 0,7 s | 1,1 s / 0,6 s / 0,3 s |
+
+**Ainda está lento? Descubra se é o computador ou a rede.** No Chrome, aperte **F12**, vá em
+**Rede** (Network), clique num pedido `thumb` ou `list` e abra **Timing**. Em **Server Timing**
+aparece quanto tempo o computador com os arquivos levou (ler o disco, gerar a miniatura). O
+restante é a rede:
+
+- Servidor demorando (centenas de ms) → é o computador: disco lento (HD externo, unidade de rede)
+  ou processador ocupado. Na primeira vez é normal; depois a miniatura vem do cache em 1 a 2 ms.
+- Servidor rápido, mas "Content Download" ou "Waiting" altos → é a conexão. Pelo Tailscale,
+  rode `tailscale ping` no outro computador: se aparecer "via DERP", a conexão está passando por
+  um retransmissor do Tailscale, que é bem mais lento que a conexão direta.
 
 ## Acesso de outro computador (Tailscale)
 

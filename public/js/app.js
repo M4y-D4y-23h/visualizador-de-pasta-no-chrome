@@ -697,6 +697,10 @@ function loadPeek(f) {
 function createPeekObserver() {
   const queue = [];
   const recs = new Map();
+  // Pedidos de miniatura das capas: cancelados ao sair da pasta, senão continuariam na
+  // fila na frente das miniaturas da pasta seguinte.
+  const cancels = new Set();
+  const track = (cancel) => cancels.add(cancel);
   let active = 0;
   let dead = false;
   const io = new IntersectionObserver((entries) => {
@@ -709,13 +713,13 @@ function createPeekObserver() {
   }, { root: el.content, rootMargin: '500px 0px' });
 
   function pump() {
-    while (!dead && active < 2 && queue.length) {
+    while (!dead && active < 4 && queue.length) {
       const card = queue.shift();
       const f = recs.get(card);
       if (!f || !card.isConnected) continue;
       active++;
       loadPeek(f)
-        .then((p) => { if (!dead && card.isConnected) applyPeek(card, p, f); })
+        .then((p) => { if (!dead && card.isConnected) applyPeek(card, p, f, track); })
         .finally(() => { active--; pump(); });
     }
   }
@@ -723,7 +727,7 @@ function createPeekObserver() {
   return {
     observe(card, f) {
       const cached = peekCache.get(`${f.path}|${f.mtime}`);
-      if (cached) { applyPeek(card, cached, f); return; }
+      if (cached) { applyPeek(card, cached, f, track); return; }
       recs.set(card, f);
       io.observe(card);
     },
@@ -732,11 +736,13 @@ function createPeekObserver() {
       io.disconnect();
       queue.length = 0;
       recs.clear();
+      for (const cancel of cancels) cancel();
+      cancels.clear();
     },
   };
 }
 
-function applyPeek(card, p, f) {
+function applyPeek(card, p, f, track) {
   const cover = card.querySelector('.fcover');
   if (p.error) {
     const t = p.error === 'forbidden' ? 'Sem acesso' : 'Indisponível';
@@ -774,7 +780,7 @@ function applyPeek(card, p, f) {
       };
       const hit = peekThumb(pf);
       if (hit) done(hit);
-      else requestThumb(pf, done);
+      else track(requestThumb(pf, done));
     });
   }
 }

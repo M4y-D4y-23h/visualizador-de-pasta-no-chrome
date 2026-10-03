@@ -1,10 +1,11 @@
 'use strict';
 /*
- * Visualizador de Pastas — servidor local (sem dependências externas).
+ * Visualizador de Pastas — servidor local (sem dependências obrigatórias).
  *
  * Serve a interface (pasta public/) e uma API mínima para:
  *   - listar pastas (somente subpastas, imagens e vídeos);
  *   - transmitir imagens e vídeos do disco (com suporte a Range, para vídeos);
+ *   - gerar miniaturas das imagens (com o pacote opcional "sharp"; veja "Miniaturas");
  *   - abrir o seletor de pastas do Windows, o aplicativo padrão e o Explorer.
  *
  * Escuta apenas em 127.0.0.1 (e ::1): nada fica exposto na rede. Com --tailscale,
@@ -12,14 +13,33 @@
  * aparelhos da mesma rede Tailscale (veja "Acesso pelo Tailscale" abaixo).
  */
 
+// Leituras de disco e miniaturas rodam no pool de threads do Node, que por padrão tem só
+// 4: com elas ocupadas (miniaturas, tamanho das pastas), até listar uma pasta esperava na
+// fila. Precisa ser definido antes da primeira operação de disco.
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '24';
+
 const http = require('http');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const { pipeline } = require('stream');
 const { fileURLToPath } = require('url');
+
+// Opcional: gera as miniaturas aqui (rápido e leve para o navegador). Sem ele, o navegador
+// baixa cada imagem original inteira para fazer a miniatura, como nas versões anteriores.
+let sharp = null;
+let sharpError = '';
+try {
+  sharp = require('sharp');
+  sharp.cache(false); // não mantém as fotos abertas (no Windows, isso impediria renomeá-las)
+} catch (e) {
+  sharpError = e && e.code === 'MODULE_NOT_FOUND' && /'sharp'/.test(e.message)
+    ? 'pacote "sharp" não instalado'
+    : String((e && e.message) || e).split('\n')[0];
+}
 
 const APP_ID = 'visualizador-de-pastas';
 const VERSION = '1.0.0';
@@ -65,6 +85,11 @@ function mediaOf(name) {
   const t = Object.prototype.hasOwnProperty.call(MEDIA_TYPES, ext) ? MEDIA_TYPES[ext] : null;
   return t ? { ext, kind: t[0], mime: t[1], web: !NOT_IN_BROWSER.has(ext) } : null;
 }
+
+// Formatos de que o servidor gera miniatura (o sharp lê; TIFF inclusive, que o Chrome não
+// exibe). SVG já é leve e vai direto; BMP, ICO e HEIC ficam com o navegador.
+const THUMB_EXTS = new Set(['jpg', 'jpeg', 'jpe', 'jfif', 'pjpeg', 'pjp', 'png', 'apng', 'gif', 'webp', 'avif', 'tif', 'tiff']);
+const canThumb = (ext) => !!sharp && THUMB_EXTS.has(ext);
 
 /* ------------------------------------------------------------- caminhos */
 
@@ -187,7 +212,7 @@ async function listDir(dir) {
       if (!media) { others++; return; }
       st = st || (await fsp.stat(full));
       files.push({
-        name, path: full, kind: media.kind, ext: media.ext, web: media.web,
+        name, path: full, kind: media.kind, ext: media.ext, web: media.web, thumb: canThumb(media.ext),
         size: st.size, mtime: Math.round(st.mtimeMs),
       });
     } catch {
@@ -228,8 +253,9 @@ async function peekDir(dir) {
     media.push({ name, ...m });
   });
 
-  // Capa: prefere formatos exibíveis no Chrome e imagens (mais leves que vídeos).
-  const rank = (m) => (m.web ? 0 : 2) + (m.kind === 'image' ? 0 : 1);
+  // Capa: prefere formatos com miniatura (exibíveis no Chrome ou feitas aqui) e imagens
+  // (mais leves que vídeos).
+  const rank = (m) => (m.web || canThumb(m.ext) ? 0 : 2) + (m.kind === 'image' ? 0 : 1);
   media.sort((a, b) => rank(a) - rank(b) || collator.compare(a.name, b.name));
 
   const preview = [];
@@ -239,7 +265,7 @@ async function peekDir(dir) {
     try {
       const st = await fsp.stat(full);
       preview.push({
-        name: m.name, path: full, kind: m.kind, ext: m.ext, web: m.web,
+        name: m.name, path: full, kind: m.kind, ext: m.ext, web: m.web, thumb: canThumb(m.ext),
         size: st.size, mtime: Math.round(st.mtimeMs),
       });
     } catch { /* ignorado */ }
@@ -317,16 +343,24 @@ function postAllowed(req) {
   return true;
 }
 
-function sendJson(res, status, obj) {
+function sendJson(res, status, obj, extraHeaders) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
+    ...(extraHeaders || {}),
   });
   res.end(body);
 }
+
+// Cabeçalho Server-Timing: o Chrome mostra, em Ferramentas do desenvolvedor › Rede ›
+// Timing, quanto da espera foi trabalho deste computador (disco, miniatura) e quanto foi
+// transferência pela rede.
+const serverTiming = (name, t0, desc) => ({
+  'Server-Timing': `${name};${desc ? `desc="${desc}";` : ''}dur=${(performance.now() - t0).toFixed(1)}`,
+});
 
 function sendError(res, status, code, message, extra) {
   sendJson(res, status, { error: code, message, ...(extra || {}) });
@@ -512,6 +546,7 @@ function getHome(force) {
 /* ------------------------------------------------------------------ API */
 
 async function apiList(res, raw) {
+  const t0 = performance.now();
   const target = normalizePath(raw);
   if (!target) {
     return sendError(res, 400, 'invalid', 'Caminho inválido. Use um caminho completo, por exemplo C:\\Users\\Você\\Pictures.');
@@ -546,16 +581,35 @@ async function apiList(res, raw) {
   let mtime = 0;
   try { mtime = Math.round((await fsp.stat(dir)).mtimeMs); } catch { /* opcional */ }
 
-  return sendJson(res, 200, {
+  sendJson(res, 200, {
     path: dir, name: displayName(dir), parent: parentOf(dir), mtime, ...listing, open, notice,
-  });
+  }, serverTiming('disco', t0, 'listar a pasta'));
+  warmFolder(dir, listing);
+  return undefined;
+}
+
+// Resumos já calculados (pela pré-geração ou por outro pedido), válidos enquanto a pasta
+// não muda.
+const PEEK_TTL = 5 * 60 * 1000;
+const peekCache = new Map(); // caminho -> { mtime, at, data }
+
+async function cachedPeek(dir) {
+  const st = await fsp.stat(dir);
+  const hit = peekCache.get(dir);
+  if (hit && hit.mtime === st.mtimeMs && Date.now() - hit.at < PEEK_TTL) return hit.data;
+  const data = await peekDir(dir);
+  peekCache.delete(dir);
+  peekCache.set(dir, { mtime: st.mtimeMs, at: Date.now(), data });
+  if (peekCache.size > 5000) peekCache.delete(peekCache.keys().next().value);
+  return data;
 }
 
 async function apiPeek(res, raw) {
+  const t0 = performance.now();
   const dir = normalizePath(raw);
   if (!dir) return sendError(res, 400, 'invalid', 'Caminho inválido.');
   try {
-    return sendJson(res, 200, await peekDir(dir));
+    return sendJson(res, 200, await cachedPeek(dir), serverTiming('disco', t0, 'resumo da pasta'));
   } catch (e) {
     const [status, code, message] = fsErrorInfo(e);
     return sendError(res, status, code, message);
@@ -580,7 +634,8 @@ function limiter(max) {
   };
   return (fn) => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
 }
-const diskOp = limiter(32);
+// Abaixo do pool de threads (UV_THREADPOOL_SIZE): sobra espaço para listar e para miniaturas.
+const diskOp = limiter(16);
 const CANCELLED = new Error('cálculo cancelado');
 
 // Operação de disco de um cálculo; se ele for cancelado, o que ainda está na fila é descartado.
@@ -656,6 +711,303 @@ async function apiDirSize(req, res, raw, refresh) {
     return sendError(res, status, code, message);
   }
   return sendJson(res, 200, { path: dir, size: r.size, files: r.files, partial: r.partial });
+}
+
+/* ------------------------------------------------------------- miniaturas */
+
+// Com o sharp, as miniaturas são feitas aqui e guardadas em disco: o navegador recebe
+// ~20 KB por foto em vez do arquivo original inteiro (vários MB), o que faz muita diferença
+// em pastas grandes e, principalmente, pelo Tailscale. Ao abrir uma pasta, o servidor também
+// prepara em segundo plano as miniaturas das capas das subpastas, das imagens da pasta e das
+// primeiras imagens de cada subpasta, para que entrar nelas já seja imediato.
+
+const THUMB_SIZE = 400;          // lado menor, em pixels (o mesmo do navegador)
+const THUMB_VERSION = 1;         // mude para descartar as miniaturas antigas
+const THUMB_CACHE_MAX = 2 * 1024 ** 3; // acima disso, as mais antigas são apagadas
+const CPUS = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+const THUMB_JOBS = Math.max(2, Math.min(8, CPUS));     // miniaturas feitas ao mesmo tempo
+const THUMB_BG_JOBS = Math.max(1, Math.floor(THUMB_JOBS / 2)); // ...das quais em segundo plano
+const WARM_PER_SUBFOLDER = 40;   // primeiras imagens preparadas em cada subpasta
+const WARM_MAX_NEW = 1500;       // miniaturas novas por pasta aberta, no máximo
+
+const STATE_DIR = process.env.VISUALIZADOR_ESTADO || (IS_WIN
+  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'VisualizadorDePastas')
+  : path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'visualizador-de-pastas'));
+const THUMB_DIR = path.join(STATE_DIR, 'miniaturas');
+
+// Muda quando o arquivo muda (tamanho ou data). A data é arredondada como na listagem,
+// para que a pré-geração e o pedido do navegador cheguem ao mesmo nome.
+function thumbId(full, size, mtimeMs) {
+  const key = `${THUMB_VERSION}|${THUMB_SIZE}|${IS_WIN ? full.toLowerCase() : full}|${size}|${Math.round(mtimeMs)}`;
+  return crypto.createHash('sha1').update(key).digest('hex');
+}
+const thumbPath = (id) => path.join(THUMB_DIR, id.slice(0, 2), `${id}.vzt`);
+
+// Arquivo de cache: "VZT1", largura e altura da imagem original (uint32) e o WebP.
+async function readThumb(id) {
+  try {
+    const data = await fsp.readFile(thumbPath(id));
+    if (data.length <= 12 || data.toString('latin1', 0, 4) !== 'VZT1') return null;
+    return { w: data.readUInt32LE(4), h: data.readUInt32LE(8), buf: data.subarray(12) };
+  } catch {
+    return null;
+  }
+}
+
+async function writeThumb(id, t) {
+  const file = thumbPath(id);
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  const head = Buffer.alloc(12);
+  head.write('VZT1', 0, 'latin1');
+  head.writeUInt32LE(t.w, 4);
+  head.writeUInt32LE(t.h, 8);
+  try {
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(tmp, Buffer.concat([head, t.buf]));
+    await fsp.rename(tmp, file); // quem lê nunca vê um arquivo pela metade
+  } catch {
+    fsp.unlink(tmp).catch(() => {});
+  }
+}
+
+async function makeThumb(full) {
+  const img = sharp(full, { failOn: 'none', sequentialRead: true });
+  const meta = await img.metadata();
+  let w = meta.width;
+  let h = meta.height;
+  if (!w || !h) throw new Error('imagem sem dimensões');
+  if (meta.orientation >= 5) [w, h] = [h, w]; // fotos de celular "deitadas" (EXIF)
+  // Lado menor = THUMB_SIZE (preenche os quadrados), lado maior limitado (panoramas).
+  const scale = Math.min(1, THUMB_SIZE / Math.min(w, h), (THUMB_SIZE * 3) / Math.max(w, h));
+  const buf = await img
+    .rotate()
+    .resize(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)), { fit: 'fill' })
+    .webp({ quality: 80, effort: 2 })
+    .toBuffer();
+  return { w, h, buf };
+}
+
+// Fila com prioridade: o que o navegador pediu passa na frente da pré-geração, que usa
+// no máximo THUMB_BG_JOBS dos THUMB_JOBS lugares.
+const thumbJobs = new Map(); // id -> trabalho (pedidos iguais esperam o mesmo)
+const thumbQueue = { fg: [], bg: [] };
+let thumbActive = 0;
+let thumbActiveBg = 0;
+const thumbFailed = new Set();
+
+function pumpThumbs() {
+  while (thumbActive < THUMB_JOBS) {
+    let job = thumbQueue.fg.shift();
+    if (!job) {
+      if (thumbActiveBg >= THUMB_BG_JOBS || !thumbQueue.bg.length) return;
+      job = thumbQueue.bg.shift();
+    }
+    const bg = job.bg;
+    job.started = true;
+    thumbActive++;
+    if (bg) thumbActiveBg++;
+    makeThumb(job.full)
+      .then(async (t) => {
+        await writeThumb(job.id, t);
+        job.resolve(t);
+      }, (err) => {
+        thumbFailed.add(job.id);
+        if (thumbFailed.size > 20000) thumbFailed.delete(thumbFailed.values().next().value);
+        job.reject(err);
+      })
+      .finally(() => {
+        thumbJobs.delete(job.id);
+        thumbActive--;
+        if (bg) thumbActiveBg--;
+        pumpThumbs();
+      });
+  }
+}
+
+// Miniatura de um arquivo: do cache em disco ou gerada agora. Rejeita se não der para gerar.
+async function getThumb(full, size, mtimeMs, bg) {
+  const id = thumbId(full, size, mtimeMs);
+  const job = thumbJobs.get(id);
+  if (job) {
+    const i = !bg && job.bg && !job.started ? thumbQueue.bg.indexOf(job) : -1;
+    if (i >= 0) { // o navegador pediu: passa para a frente da fila
+      thumbQueue.bg.splice(i, 1);
+      job.bg = false;
+      thumbQueue.fg.push(job);
+      pumpThumbs();
+    }
+    return { ...(await job.promise), cached: false };
+  }
+  const hit = await readThumb(id);
+  if (hit) return { ...hit, cached: true };
+  if (thumbFailed.has(id)) throw new Error('miniatura falhou antes');
+  if (thumbJobs.has(id)) return getThumb(full, size, mtimeMs, bg); // outro pedido começou enquanto líamos
+  const created = { id, full, bg, started: false };
+  created.promise = new Promise((resolve, reject) => { created.resolve = resolve; created.reject = reject; });
+  created.promise.catch(() => {}); // a pré-geração não espera por falhas
+  thumbJobs.set(id, created);
+  thumbQueue[bg ? 'bg' : 'fg'].push(created);
+  pumpThumbs();
+  return { ...(await created.promise), cached: false };
+}
+
+async function apiThumb(req, res, raw) {
+  const t0 = performance.now();
+  const target = normalizePath(raw);
+  const media = target && mediaOf(path.basename(target));
+  if (!media || !canThumb(media.ext)) return sendError(res, 404, 'no_thumb', 'Sem miniatura para este arquivo.');
+  let st;
+  try {
+    st = await fsp.stat(target);
+  } catch (e) {
+    const [status, code, message] = fsErrorInfo(e);
+    return sendError(res, status, code, message);
+  }
+  if (!st.isFile()) return sendError(res, 404, 'not_found', 'Arquivo não encontrado.');
+
+  const etag = `"m${thumbId(target, st.size, st.mtimeMs)}"`;
+  const headers = {
+    'Content-Type': 'image/webp',
+    ETag: etag,
+    'Cache-Control': 'private, max-age=86400',
+    'X-Content-Type-Options': 'nosniff',
+  };
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+  let t;
+  try {
+    t = await getThumb(target, st.size, st.mtimeMs, false);
+  } catch {
+    // Arquivo corrompido ou variação que o sharp não lê: o navegador tenta do jeito antigo.
+    return sendError(res, 415, 'thumb_failed', 'Não foi possível gerar a miniatura.');
+  }
+  res.writeHead(200, {
+    ...headers,
+    'Content-Length': t.buf.length,
+    'X-Thumb-Width': t.w, // tamanho da imagem original
+    'X-Thumb-Height': t.h,
+    ...serverTiming('miniatura', t0, t.cached ? 'do cache' : 'gerada agora'),
+  });
+  return res.end(req.method === 'HEAD' ? undefined : t.buf);
+}
+
+// Pré-geração em segundo plano. Uma pasta aberta cancela a anterior. A mesma pasta listada
+// de novo (a interface relista ao voltar para a aba) não recomeça tudo.
+const WARM_REPEAT_MS = 10 * 60 * 1000;
+let warmToken = 0;
+let warmState = null; // { dir, done, at }
+
+function warmFolder(dir, listing) {
+  if (!sharp) return;
+  if (warmState && warmState.dir === dir && (!warmState.done || Date.now() - warmState.at < WARM_REPEAT_MS)) return;
+  const token = ++warmToken;
+  const state = { dir, done: false, at: 0 };
+  warmState = state;
+  // Um instante depois: os primeiros pedidos do navegador chegam antes.
+  setTimeout(() => {
+    warmRun(token, listing)
+      .catch((e) => console.warn('[aviso] Pré-geração de miniaturas:', e.message))
+      .finally(() => {
+        state.done = true;
+        state.at = Date.now();
+      });
+  }, 300);
+}
+
+// As primeiras imagens (por nome) de uma subpasta, sem listar tudo o que há nela.
+async function firstImages(dir, n) {
+  const names = [];
+  for (const d of await fsp.readdir(dir, { withFileTypes: true })) {
+    if (!d.isFile() || isHidden(d.name, dir)) continue;
+    const m = mediaOf(d.name);
+    if (m && canThumb(m.ext)) names.push(d.name);
+  }
+  names.sort(collator.compare);
+  const out = [];
+  for (const name of names.slice(0, n)) {
+    const full = path.join(dir, name);
+    try {
+      const st = await fsp.stat(full);
+      out.push({ path: full, size: st.size, mtime: Math.round(st.mtimeMs) });
+    } catch { /* sumiu */ }
+  }
+  return out;
+}
+
+async function warmRun(token, listing) {
+  const alive = () => token === warmToken;
+  let made = 0;
+  const warm = async (files) => {
+    await mapLimit(files, THUMB_BG_JOBS, async (f) => {
+      if (!alive() || made >= WARM_MAX_NEW) return;
+      const id = thumbId(f.path, f.size, f.mtime);
+      if (thumbFailed.has(id)) return;
+      try {
+        await fsp.access(thumbPath(id)); // já existe: não precisa ler
+        return;
+      } catch { /* ainda não existe */ }
+      try {
+        if (!(await getThumb(f.path, f.size, f.mtime, true)).cached) made++;
+      } catch { /* arquivo com problema: o navegador mostra o ícone */ }
+    });
+  };
+  const subfolders = listing.folders.slice().sort((a, b) => collator.compare(a.name, b.name));
+
+  // 1) Capas das subpastas (aparecem no topo da tela).
+  const covers = [];
+  await mapLimit(subfolders, 4, async (sub, i) => {
+    if (!alive()) return;
+    try { covers[i] = (await cachedPeek(sub.path)).preview.filter((p) => p.thumb); } catch { /* sem acesso */ }
+  });
+  if (!alive()) return;
+  await warm(covers.flat());
+  // 2) Imagens desta pasta.
+  if (!alive()) return;
+  await warm(listing.files.filter((f) => f.thumb));
+  // 3) Primeiras imagens de cada subpasta: entrar nelas já mostra tudo.
+  for (const sub of subfolders) {
+    if (!alive() || made >= WARM_MAX_NEW) return;
+    try { await warm(await firstImages(sub.path, WARM_PER_SUBFOLDER)); } catch { /* sem acesso */ }
+  }
+}
+
+// Mantém o cache abaixo de THUMB_CACHE_MAX, apagando as miniaturas mais antigas.
+async function trimThumbCache() {
+  let shards;
+  try { shards = await fsp.readdir(THUMB_DIR); } catch { return; }
+  const files = [];
+  let total = 0;
+  await mapLimit(shards, 4, async (shard) => {
+    const dir = path.join(THUMB_DIR, shard);
+    let names;
+    try { names = await fsp.readdir(dir); } catch { return; }
+    for (const name of names) {
+      const full = path.join(dir, name);
+      try {
+        const st = await fsp.stat(full);
+        files.push({ full, size: st.size, t: st.mtimeMs });
+        total += st.size;
+      } catch { /* apagado no meio do caminho */ }
+    }
+  });
+  if (total <= THUMB_CACHE_MAX) return;
+  files.sort((a, b) => a.t - b.t);
+  for (const f of files) {
+    if (total <= THUMB_CACHE_MAX * 0.8) break;
+    try {
+      await fsp.unlink(f.full);
+      total -= f.size;
+    } catch { /* em uso: fica para a próxima */ }
+  }
+}
+
+function scheduleThumbCacheTrim() {
+  if (!sharp) return;
+  const run = () => trimThumbCache().catch(() => {});
+  setTimeout(run, 2 * 60 * 1000).unref();
+  setInterval(run, 6 * 60 * 60 * 1000).unref();
 }
 
 // RFC 8187: além do que encodeURIComponent já codifica, ' ( ) * também precisam ser.
@@ -809,7 +1161,7 @@ async function handleApi(req, res, url) {
     case 'info':
       return sendJson(res, 200, {
         app: APP_ID, version: VERSION, platform: process.platform, sep: path.sep, home: os.homedir(),
-        tailscale: TAILSCALE, remote: !isLocalClient(req),
+        tailscale: TAILSCALE, remote: !isLocalClient(req), thumbs: !!sharp,
       });
     case 'home':
       return sendJson(res, 200, await getHome(q.get('refresh') === '1'));
@@ -821,6 +1173,8 @@ async function handleApi(req, res, url) {
       return apiDirSize(req, res, q.get('path'), q.get('refresh') === '1');
     case 'file':
       return apiFile(req, res, q.get('path'), q.get('download') === '1');
+    case 'thumb':
+      return apiThumb(req, res, q.get('path'));
     default:
       return sendError(res, 404, 'not_found', 'Rota desconhecida.');
   }
@@ -1107,6 +1461,10 @@ function printBanner(url) {
     }
   }
   console.log('');
+  console.log(sharp
+    ? '   Miniaturas: geradas aqui e guardadas (rápido também pelo Tailscale).'
+    : `   Miniaturas: feitas pelo navegador, mais lento (${sharpError}).`);
+  console.log('');
   console.log('   Mantenha esta janela aberta enquanto usa o visualizador.');
   console.log('   Para encerrar, feche esta janela ou pressione Ctrl+C.');
   console.log(`  ${line}`);
@@ -1156,6 +1514,7 @@ function start(port, attempt = 0) {
     const url = `http://localhost:${port}/`;
     printBanner(url);
     getHome().catch(() => {}); // pré-carrega locais e unidades
+    scheduleThumbCacheTrim();
     openBrowser(url);
   });
 }

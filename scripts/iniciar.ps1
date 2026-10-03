@@ -134,7 +134,11 @@ foreach ($prog in @($manifesto.programas)) {
 
 Escrever-Etapa 'Pacotes do projeto (npm)'
 $pacote = Ler-PacoteNpm $raiz
-$dependencias = Nomes-Dependencias $pacote
+$dependencias = @(Nomes-Dependencias $pacote)
+# Sem os opcionais (optionalDependencies) o visualizador abre do mesmo jeito: uma falha
+# neles vira só um aviso. Hoje: "sharp", que gera as miniaturas no servidor (bem mais rápido).
+$obrigatorias = @(Nomes-Dependencias-Obrigatorias $pacote)
+$semOpcionais = 'Seguindo sem eles: o visualizador funciona, só que com as miniaturas mais lentas.'
 
 if (-not $dependencias.Count) {
     Escrever-Ok 'Nenhum pacote necessário no momento.'
@@ -149,14 +153,14 @@ if (-not $dependencias.Count) {
     $precisaInstalar = $instalada -ne (Assinatura-Npm $raiz $versaoNode)
 
     if (-not (Test-Path -LiteralPath $npm)) {
-        Escrever-Erro "o npm não foi encontrado junto do Node.js ($npm). Reinstale o Node.js por https://nodejs.org."
-        $falhou = $true
+        $msg = "o npm não foi encontrado junto do Node.js ($npm). Reinstale o Node.js por https://nodejs.org."
+        if ($obrigatorias.Count) { Escrever-Erro $msg; $falhou = $true } else { Escrever-Aviso "$msg $semOpcionais" }
     } elseif ($precisaInstalar -or $verificarAtualizacoes) {
         $acao = if ($precisaInstalar) { 'install' } else { 'update' }
         if (-not (Tem-Internet 'https://registry.npmjs.org/')) {
             if ($precisaInstalar -and -not $instalada) {
-                Escrever-Erro 'Sem conexão com a internet para baixar os pacotes do projeto.'
-                $falhou = $true
+                $msg = 'Sem conexão com a internet para baixar os pacotes do projeto.'
+                if ($obrigatorias.Count) { Escrever-Erro $msg; $falhou = $true } else { Escrever-Aviso "$msg $semOpcionais" }
             } else {
                 Escrever-Aviso 'Sem internet: usando os pacotes já instalados.'
             }
@@ -172,8 +176,8 @@ if (-not $dependencias.Count) {
                 Set-Content -LiteralPath $marcaNpm -Value (Assinatura-Npm $raiz $versaoNode) -Encoding ASCII
                 Escrever-Ok $(if ($precisaInstalar) { 'Pacotes instalados.' } else { 'Pacotes em dia.' })
             } elseif ($precisaInstalar) {
-                Escrever-Erro "o npm não conseguiu instalar os pacotes (código $codigoNpm)."
-                $falhou = $true
+                $msg = "o npm não conseguiu instalar os pacotes (código $codigoNpm)."
+                if ($obrigatorias.Count) { Escrever-Erro $msg; $falhou = $true } else { Escrever-Aviso "$msg $semOpcionais" }
             } else {
                 Escrever-Aviso "não foi possível atualizar os pacotes agora (código $codigoNpm); usando os já instalados."
             }
@@ -226,6 +230,10 @@ if ($argsServidor -contains '--tailscale') {
         Escrever-Info 'Se o Windows perguntar sobre o Firewall, clique em "Permitir" (redes privadas).'
     }
 }
+
+# Mais threads para leituras de disco e miniaturas (o padrão do Node é 4). O server.js também
+# define isso, mas pelo ambiente vale com certeza desde o início.
+if (-not $env:UV_THREADPOOL_SIZE) { $env:UV_THREADPOOL_SIZE = '24' }
 
 & $nodeExe (Join-Path $raiz 'server.js') @argsServidor
 exit $LASTEXITCODE

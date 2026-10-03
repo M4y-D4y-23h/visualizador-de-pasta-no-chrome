@@ -41,3 +41,5 @@ export const api = {
 
 // Endereço do arquivo; "v" muda quando o arquivo muda, permitindo cache seguro.
 export const fileSrc = (f) => `/@api/file?path=${q(f.path)}&v=${f.mtime}-${f.size}`;
+// Miniatura feita pelo servidor (quando o arquivo tem "thumb").
+export const thumbSrc = (f) => `/@api/thumb?path=${q(f.path)}&v=${f.mtime}-${f.size}`;

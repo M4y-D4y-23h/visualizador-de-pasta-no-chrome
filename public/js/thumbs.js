@@ -1,9 +1,11 @@
-// Miniaturas: geradas sob demanda (só o que está perto da tela), com fila,
-// cache em memória e cache persistente (Cache Storage) entre sessões.
-import { fileSrc } from './api.js';
+// Miniaturas: pedidas sob demanda (só o que está perto da tela), com fila e cache em
+// memória. Imagens com "thumb" vêm prontas do servidor (pequenas e guardadas por ele);
+// as demais são geradas aqui, a partir do arquivo original, e guardadas no Cache Storage.
+import { fileSrc, thumbSrc } from './api.js';
 
 const SIZE = 400;               // lado menor da miniatura, em pixels
-const LIMIT = { image: 3, video: 2 };
+// Pedidos simultâneos: as do servidor são leves; gerar aqui exige baixar o original.
+const LIMIT = { server: 6, image: 3, video: 2 };
 const MEM_TARGET = 4000;        // entradas mantidas em memória após limpeza
 const CACHE_NAME = 'miniaturas-v1';
 
@@ -11,9 +13,12 @@ const mem = new Map();          // chave -> { url, w, h, dur, direct? } (ordem =
 const failed = new Set();
 const jobs = new Map();         // chave -> job
 const queue = [];
-const active = { image: 0, video: 0 };
+const active = { server: 0, image: 0, video: 0 };
 
 export const thumbKey = (f) => `${f.path}|${f.mtime}|${f.size}`;
+
+// Há como ter miniatura: o servidor faz, ou o Chrome exibe o formato.
+const hasThumb = (f) => !!f.thumb || f.web !== false;
 
 export function peekThumb(f) {
   const k = thumbKey(f);
@@ -160,7 +165,27 @@ function videoThumb(f) {
   });
 }
 
+async function serverThumb(f) {
+  try {
+    // Prioridade baixa: abrir uma pasta (listagem) passa na frente das miniaturas.
+    const res = await fetch(thumbSrc(f), { priority: 'low' });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob.size) return null;
+    const w = Number(res.headers.get('x-thumb-width')) || 0;
+    const h = Number(res.headers.get('x-thumb-height')) || 0;
+    return { url: URL.createObjectURL(blob), w, h, dur: 0 };
+  } catch {
+    return null;
+  }
+}
+
 async function produce(f) {
+  if (f.thumb) {
+    const fromServer = await serverThumb(f);
+    // Se o servidor não conseguiu, tenta aqui (quando o Chrome exibe o formato).
+    if (fromServer || f.web === false) return fromServer;
+  }
   const key = thumbKey(f);
   const cached = await fromCache(key);
   if (cached) return cached;
@@ -176,7 +201,7 @@ async function produce(f) {
 function pump() {
   for (let i = 0; i < queue.length;) {
     const job = queue[i];
-    const kind = job.file.kind === 'video' ? 'video' : 'image';
+    const kind = job.file.thumb ? 'server' : job.file.kind === 'video' ? 'video' : 'image';
     if (active[kind] >= LIMIT[kind]) { i++; continue; }
     queue.splice(i, 1);
     run(job, kind);
@@ -208,7 +233,7 @@ export function requestThumb(f, cb) {
   const key = thumbKey(f);
   const hit = peekThumb(f);
   if (hit) { cb(hit); return () => {}; }
-  if (failed.has(key) || f.web === false) { cb(null); return () => {}; }
+  if (failed.has(key) || !hasThumb(f)) { cb(null); return () => {}; }
   if (f.ext === 'svg') {
     // SVG é vetorial e leve: usa o próprio arquivo.
     const v = { url: fileSrc(f), w: 0, h: 0, dur: 0, direct: true };
@@ -260,7 +285,7 @@ export function createThumbObserver({ root = null, margin = '600px' } = {}) {
     observe(el, file, apply) {
       const hit = peekThumb(file);
       if (hit) { apply(hit); return; }
-      if (failed.has(thumbKey(file)) || file.web === false) { apply(null); return; }
+      if (failed.has(thumbKey(file)) || !hasThumb(file)) { apply(null); return; }
       recs.set(el, { file, apply, cancel: null });
       io.observe(el);
     },

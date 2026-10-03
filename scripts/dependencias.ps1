@@ -214,7 +214,17 @@ function Ler-PacoteNpm([string]$raiz) {
     return Get-Content -LiteralPath (Join-Path $raiz 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+# Todos os pacotes a instalar: obrigatórios (dependencies) e opcionais (optionalDependencies).
 function Nomes-Dependencias($pacote) {
+    $nomes = @()
+    foreach ($grupo in 'dependencies', 'optionalDependencies') {
+        if ($pacote.$grupo) { $nomes += @($pacote.$grupo.PSObject.Properties | ForEach-Object { $_.Name }) }
+    }
+    return $nomes
+}
+
+# Só os obrigatórios: sem eles, o visualizador não abre.
+function Nomes-Dependencias-Obrigatorias($pacote) {
     if (-not $pacote.dependencies) { return @() }
     return @($pacote.dependencies.PSObject.Properties | ForEach-Object { $_.Name })
 }

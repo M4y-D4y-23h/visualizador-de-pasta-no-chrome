@@ -48,8 +48,9 @@ A cada inicialização o `.bat` verifica tudo de que o visualizador precisa:
 - **Navegar:** as subpastas aparecem primeiro, com uma prévia das imagens de dentro; depois vêm
   as imagens e os vídeos, sempre em **grade** ao abrir uma pasta (o modo lista é opcional).
 - **Visualizar:** clique em um arquivo. Use **← →** para passar pelos arquivos da pasta.
-- **Voltar:** **Backspace** volta um nível (do arquivo para a pasta, da pasta para a de cima).
-  O botão Voltar do Chrome e apagar o último trecho da URL também funcionam.
+- **Voltar:** **Backspace** ou o **botão direito do mouse** voltam um nível (do arquivo para a
+  pasta, da pasta para a de cima). O botão Voltar do Chrome e apagar o último trecho da URL também
+  funcionam. Para ver o menu normal do Chrome, use **Shift + botão direito**.
 
 O endereço sempre mostra onde você está, por exemplo:
 
@@ -66,7 +67,7 @@ Dá para salvar nos favoritos do Chrome ou abrir em outra aba (Ctrl+clique).
 |---|---|
 | ← ↑ → ↓ | Mover a seleção |
 | Enter | Abrir pasta / visualizar arquivo |
-| Backspace | Voltar um nível |
+| Backspace ou botão direito | Voltar um nível |
 | / | Buscar nesta pasta |
 | + / − | Aumentar / diminuir os ícones |
 | ? | Ver todos os atalhos |
@@ -74,7 +75,7 @@ Dá para salvar nos favoritos do Chrome ou abrir em outra aba (Ctrl+clique).
 | No visualizador | |
 |---|---|
 | ← → | Arquivo anterior / próximo |
-| Esc ou Backspace | Fechar e voltar à pasta |
+| Esc, Backspace ou botão direito | Fechar e voltar à pasta |
 | + − 0 (ou roda do mouse) | Zoom; 0 ajusta à tela; duplo clique = tamanho real |
 | R | Girar a imagem |
 | F | Tela cheia |

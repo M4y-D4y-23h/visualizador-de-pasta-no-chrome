@@ -30,7 +30,7 @@ export function createViewer({ onChange, onRequestClose, onOpenExternal, onRevea
   root.tabIndex = -1;
   root.innerHTML = `
     <div class="v-top">
-      <button class="v-btn v-back" type="button" data-act="close" title="Voltar à pasta (Esc ou Backspace)">
+      <button class="v-btn v-back" type="button" data-act="close" title="Voltar à pasta (Esc, Backspace ou botão direito)">
         ${icon('arrowLeft')}<span>Voltar à pasta</span>
       </button>
       <div class="v-title">

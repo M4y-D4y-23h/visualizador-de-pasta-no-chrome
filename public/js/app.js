@@ -1034,7 +1034,7 @@ function renderHome() {
           <span class="hero-eyebrow">${icon('sparkles')}${isRemote() ? 'Imagens e vídeos do computador remoto' : 'Imagens e vídeos do seu computador'}</span>
           <h1>Escolha uma pasta para começar</h1>
           <p>Navegue pelas subpastas, veja tudo em uma grade organizada e clique em um arquivo para visualizá-lo.
-             Para voltar, use <kbd>Backspace</kbd> ou o botão Voltar do navegador.</p>
+             Para voltar, use <kbd>Backspace</kbd>, o botão direito do mouse ou o botão Voltar do navegador.</p>
           <div class="hero-actions">
             ${isRemote() ? '' : `<button class="btn btn-primary btn-lg" type="button" data-act="pick">${icon('folderPlus')}Escolher pasta…</button>`}
             <form class="hero-path" data-form="path" autocomplete="off">
@@ -1071,7 +1071,7 @@ function renderHome() {
   html += `
       <section class="tips">
         <div class="tip"><kbd>Enter</kbd> abre a pasta ou o arquivo selecionado</div>
-        <div class="tip"><kbd>Backspace</kbd> volta para a pasta anterior</div>
+        <div class="tip"><kbd>Backspace</kbd> ou o botão direito do mouse voltam para a pasta anterior</div>
         <div class="tip"><kbd>←</kbd> <kbd>→</kbd> trocam de arquivo no visualizador</div>
         <div class="tip"><kbd>?</kbd> mostra todos os atalhos</div>
       </section>
@@ -1435,7 +1435,7 @@ function renderHelp() {
       <h3>${icon('folder')}Nas pastas</h3>
       ${row(`${k('←')}${k('↑')}${k('→')}${k('↓')}`, 'Mover a seleção')}
       ${row(k('Enter'), 'Abrir a pasta ou visualizar o arquivo')}
-      ${row(k('Backspace'), 'Voltar um nível (pasta de cima)')}
+      ${row(`${k('Backspace')}${or}<span class="help-mouse">Botão direito</span>`, 'Voltar um nível (pasta de cima)')}
       ${row(`${k('Alt', '←')}${or}${k('Alt', '→')}`, 'Voltar / avançar no histórico')}
       ${row(`${k('Home')}${or}${k('End')}`, 'Primeiro / último item')}
       ${row(k('/'), 'Buscar nesta pasta')}
@@ -1445,7 +1445,7 @@ function renderHelp() {
     <section>
       <h3>${icon('image')}No visualizador</h3>
       ${row(`${k('←')}${or}${k('→')}`, 'Arquivo anterior / próximo')}
-      ${row(`${k('Esc')}${or}${k('Backspace')}`, 'Fechar e voltar à pasta')}
+      ${row(`${k('Esc')}${or}${k('Backspace')}${or}<span class="help-mouse">Botão direito</span>`, 'Fechar e voltar à pasta')}
       ${row(`${k('+')}${k('−')}${k('0')}`, 'Zoom (ou roda do mouse) · 0 ajusta à tela')}
       ${row('<span class="help-mouse">Duplo clique</span>', 'Alternar entre ajustado e tamanho real')}
       ${row(k('R'), 'Girar a imagem')}
@@ -1460,8 +1460,28 @@ function renderHelp() {
 
 /* ============================================================ eventos */
 
+// Botão direito do mouse = Backspace: fecha o arquivo aberto ou sobe um nível.
+// O menu normal do Chrome continua nos campos de texto (para colar caminhos), com
+// texto selecionado e com Shift + botão direito. Toque longo (celular) e a tecla de
+// menu do teclado também mantêm o menu.
+function onContextMenu(e) {
+  if (e.shiftKey || e.button !== 2) return;
+  if (e.pointerType && e.pointerType !== 'mouse') return;
+  if (openModalEl() || isTyping(e.target)) return;
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+  if (viewer && viewer.isOpen()) {
+    e.preventDefault();
+    closeViewerFromUI();
+  } else if (S.page !== 'home') {
+    e.preventDefault();
+    goUp();
+  }
+}
+
 function bindEvents() {
   window.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('contextmenu', onContextMenu);
 
   document.addEventListener('click', (e) => {
     if (e.target.closest('#viewer')) return;

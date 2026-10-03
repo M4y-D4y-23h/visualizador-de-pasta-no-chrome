@@ -47,6 +47,10 @@ A cada inicialização o `.bat` verifica tudo de que o visualizador precisa:
   inicial ou na barra de endereço do visualizador (clique nela para digitar).
 - **Navegar:** as subpastas aparecem primeiro, com uma prévia das imagens de dentro; depois vêm
   as imagens e os vídeos, sempre em **grade** ao abrir uma pasta (o modo lista é opcional).
+- **Ordenar:** por nome, data, tamanho ou tipo. Por **tamanho**, as subpastas também entram na
+  ordem, pelo tamanho total de tudo o que há dentro delas. Em pastas grandes o cálculo leva alguns
+  segundos: os tamanhos vão aparecendo nos cartões e a ordem é refeita quando todos ficam prontos.
+  Um "≥" antes do tamanho indica que alguma subpasta não pôde ser lida (sem permissão).
 - **Visualizar:** clique em um arquivo. Use **← →** para passar pelos arquivos da pasta.
 - **Voltar:** **Backspace** ou o **botão direito do mouse** voltam um nível (do arquivo para a
   pasta, da pasta para a de cima). O botão Voltar do Chrome e apagar o último trecho da URL também

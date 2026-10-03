@@ -33,6 +33,7 @@ export const api = {
   home: (refresh) => request('/@api/home' + (refresh ? '?refresh=1' : '')),
   list: (p, signal) => request('/@api/list?path=' + q(p), { signal }),
   peek: (p) => request('/@api/peek?path=' + q(p)),
+  dirSize: (p, refresh, signal) => request('/@api/dirsize?path=' + q(p) + (refresh ? '&refresh=1' : ''), { signal }),
   pick: (initial) => post('/@api/pick', { initial }),
   open: (p) => post('/@api/open', { path: p, action: 'open' }),
   reveal: (p) => post('/@api/open', { path: p, action: 'reveal' }),

@@ -562,6 +562,102 @@ async function apiPeek(res, raw) {
   }
 }
 
+/* ------------------------------------------------- tamanho das pastas */
+
+// Tamanho total de uma pasta (todos os arquivos dentro dela, em qualquer nível), para
+// ordenar as subpastas por tamanho. Atalhos e junções não são seguidos (evita contar em
+// dobro e laços). Itens sem permissão ficam de fora e o resultado sai como "partial".
+
+// Limita as operações de disco simultâneas de todos os cálculos juntos.
+function limiter(max) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    if (active >= max || !queue.length) return;
+    active++;
+    const { fn, resolve, reject } = queue.shift();
+    fn().then(resolve, reject).finally(() => { active--; next(); });
+  };
+  return (fn) => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
+}
+const diskOp = limiter(32);
+const CANCELLED = new Error('cálculo cancelado');
+
+// Operação de disco de um cálculo; se ele for cancelado, o que ainda está na fila é descartado.
+const sizeOp = (ctx, fn) => diskOp(() => (ctx.aborted ? Promise.reject(CANCELLED) : fn()));
+
+// Resultados por pasta (inclusive as subpastas percorridas): reabrir uma pasta já
+// calculada, ou entrar numa subpasta dela, fica instantâneo por alguns minutos.
+const SIZE_TTL = 10 * 60 * 1000;
+const SIZE_CACHE_MAX = 200000;
+const sizeCache = new Map(); // caminho -> { size, files, partial, at }
+
+function cacheSize(dir, r) {
+  sizeCache.delete(dir);
+  sizeCache.set(dir, { ...r, at: Date.now() });
+  if (sizeCache.size > SIZE_CACHE_MAX) {
+    for (const k of sizeCache.keys()) {
+      sizeCache.delete(k);
+      if (sizeCache.size <= SIZE_CACHE_MAX * 0.9) break;
+    }
+  }
+}
+
+async function dirTotal(dir, ctx) {
+  if (!ctx.refresh) {
+    const hit = sizeCache.get(dir);
+    if (hit && Date.now() - hit.at < SIZE_TTL) return hit;
+  }
+  if (ctx.aborted) return { size: 0, files: 0, partial: true };
+  let dirents;
+  try {
+    dirents = await sizeOp(ctx, () => fsp.readdir(dir, { withFileTypes: true }));
+  } catch (e) {
+    return { size: 0, files: 0, partial: true, error: e };
+  }
+  let size = 0;
+  let files = 0;
+  let partial = false;
+  const subdirs = [];
+  await Promise.all(dirents.map(async (d) => {
+    const full = path.join(dir, d.name);
+    if (d.isDirectory()) { subdirs.push(full); return; }
+    if (!d.isFile() || ctx.aborted) return; // atalhos/junções e itens especiais
+    try {
+      // Lê antes de somar: "size += await ..." perderia valores com leituras paralelas.
+      const st = await sizeOp(ctx, () => fsp.lstat(full));
+      size += st.size;
+      files++;
+    } catch {
+      partial = true;
+    }
+  }));
+  const subs = await Promise.all(subdirs.map((sd) => dirTotal(sd, ctx)));
+  for (const r of subs) {
+    size += r.size;
+    files += r.files;
+    if (r.partial) partial = true;
+  }
+  const result = { size, files, partial: partial || ctx.aborted };
+  if (!ctx.aborted) cacheSize(dir, result);
+  return result;
+}
+
+async function apiDirSize(req, res, raw, refresh) {
+  const dir = normalizePath(raw);
+  if (!dir) return sendError(res, 400, 'invalid', 'Caminho inválido.');
+  const ctx = { aborted: false, refresh };
+  // Quem pediu desistiu (trocou de pasta ou de ordenação): para de percorrer o disco.
+  res.on('close', () => { if (!res.writableFinished) ctx.aborted = true; });
+  const r = await dirTotal(dir, ctx);
+  if (ctx.aborted) return undefined;
+  if (r.error) {
+    const [status, code, message] = fsErrorInfo(r.error);
+    return sendError(res, status, code, message);
+  }
+  return sendJson(res, 200, { path: dir, size: r.size, files: r.files, partial: r.partial });
+}
+
 // RFC 8187: além do que encodeURIComponent já codifica, ' ( ) * também precisam ser.
 const encodeFilename = (name) => encodeURIComponent(name)
   .replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
@@ -721,6 +817,8 @@ async function handleApi(req, res, url) {
       return apiList(res, q.get('path'));
     case 'peek':
       return apiPeek(res, q.get('path'));
+    case 'dirsize':
+      return apiDirSize(req, res, q.get('path'), q.get('refresh') === '1');
     case 'file':
       return apiFile(req, res, q.get('path'), q.get('download') === '1');
     default:

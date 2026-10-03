@@ -514,6 +514,7 @@ function computeVisible() {
     type: (a, b) => collator.compare(a.ext, b.ext) || byName(a, b),
   }[key] || byName;
   if (key === 'name' || key === 'date') folders.sort((a, b) => cmp(a, b) * dir);
+  else if (key === 'size') folders.sort((a, b) => compareFolderSizes(a, b, dir));
   else folders.sort(byName);
   files.sort((a, b) => cmp(a, b) * dir);
 
@@ -526,11 +527,11 @@ function listHead(kind) {
   const cols = [
     ['name', 'Nome'],
     ['type', 'Tipo'],
-    ['size', kind === 'folders' ? 'Itens' : 'Tamanho'],
+    ['size', kind === 'folders' && S.sort.key !== 'size' ? 'Itens' : 'Tamanho'],
     ['date', 'Modificado em'],
   ];
   const cells = cols.map(([k, label]) => {
-    const sortable = kind === 'files' || k === 'name' || k === 'date';
+    const sortable = kind === 'files' || k !== 'type';
     const on = sortable && S.sort.key === k;
     return sortable
       ? `<button type="button" class="lh lh-${k}${on ? ' on' : ''}" data-sort="${k}">${label}${on ? icon(S.sort.dir > 0 ? 'chevronUp' : 'chevronDown') : ''}</button>`
@@ -598,7 +599,8 @@ function renderSections() {
   let html = '';
   if (nF) {
     html += `<section class="section" aria-label="Pastas">
-        <h2 class="section-title">${icon('folder')}Pastas<span class="pill">${fmtNumber(nF)}</span></h2>
+        <h2 class="section-title">${icon('folder')}Pastas<span class="pill">${fmtNumber(nF)}</span>
+          <span class="size-progress" id="sizeProgress" hidden><span class="spinner"></span><span></span></span></h2>
         ${listHead('folders')}
         <div class="grid grid-folders">${S.folders.map((f, i) => folderCard(f, i)).join('')}</div>
       </section>`;
@@ -648,10 +650,15 @@ function renderSections() {
     S.thumbObs.observe(card, f, (res) => applyThumb(card, f, res));
   }
   S.peekObs = createPeekObserver();
-  for (let i = 0; i < nF; i++) S.peekObs.observe(S.items[i], S.folders[i]);
+  for (let i = 0; i < nF; i++) {
+    paintFolderMeta(S.items[i], S.folders[i]);
+    S.peekObs.observe(S.items[i], S.folders[i]);
+  }
   trimThumbs(S.dir.files);
 
   if (prevSel) selectByName(prevSel, { focus: false, scroll: false });
+  ensureFolderSizes();
+  updateSizeProgress();
 }
 
 function applyThumb(card, f, res) {
@@ -708,7 +715,7 @@ function createPeekObserver() {
       if (!f || !card.isConnected) continue;
       active++;
       loadPeek(f)
-        .then((p) => { if (!dead && card.isConnected) applyPeek(card, p); })
+        .then((p) => { if (!dead && card.isConnected) applyPeek(card, p, f); })
         .finally(() => { active--; pump(); });
     }
   }
@@ -716,7 +723,7 @@ function createPeekObserver() {
   return {
     observe(card, f) {
       const cached = peekCache.get(`${f.path}|${f.mtime}`);
-      if (cached) { applyPeek(card, cached); return; }
+      if (cached) { applyPeek(card, cached, f); return; }
       recs.set(card, f);
       io.observe(card);
     },
@@ -729,14 +736,13 @@ function createPeekObserver() {
   };
 }
 
-function applyPeek(card, p) {
-  const sub = card.querySelector('.card-sub');
-  const items = card.querySelector('[data-items]');
+function applyPeek(card, p, f) {
   const cover = card.querySelector('.fcover');
   if (p.error) {
     const t = p.error === 'forbidden' ? 'Sem acesso' : 'Indisponível';
-    sub.textContent = t;
-    items.textContent = t;
+    card.dataset.peekSub = t;
+    card.dataset.peekItems = t;
+    paintFolderMeta(card, f);
     cover.classList.add('is-locked');
     cover.querySelector('.fcover-icon').innerHTML = icon('lock');
     return;
@@ -746,9 +752,10 @@ function applyPeek(card, p) {
   if (p.videos) parts.push(plural(p.videos, 'vídeo', 'vídeos'));
   if (p.folders) parts.push(plural(p.folders, 'pasta', 'pastas'));
   const total = p.images + p.videos + p.folders;
-  sub.textContent = parts.length ? parts.join(' · ') : 'Vazia';
-  sub.title = sub.textContent;
-  items.textContent = total ? plural(total, 'item', 'itens') : 'Vazia';
+  card.dataset.peekSub = parts.length ? parts.join(' · ') : 'Vazia';
+  card.dataset.peekItems = total ? plural(total, 'item', 'itens') : 'Vazia';
+  card.dataset.peekEmpty = total ? '' : '1';
+  paintFolderMeta(card, f);
   cover.classList.toggle('is-empty', !total);
 
   if (p.preview && p.preview.length) {
@@ -770,6 +777,108 @@ function applyPeek(card, p) {
       else requestThumb(pf, done);
     });
   }
+}
+
+/* ------------------------------------------- tamanho das subpastas */
+
+// Ao ordenar por tamanho, o servidor soma tudo o que há dentro de cada subpasta.
+// Pastas grandes podem demorar: os tamanhos aparecem nos cartões conforme chegam e
+// a ordem é refeita uma vez, quando todos estiverem prontos.
+const folderSizes = new Map(); // caminho -> { size, partial } | { error }
+let sizeJob = null;
+let sizesRefresh = false;
+
+function knownSize(f) {
+  const s = folderSizes.get(f.path);
+  return s && !s.error ? s.size : -1;
+}
+
+// Pastas sem tamanho (ainda calculando, ou sem acesso) ficam por último, em ordem de nome.
+function compareFolderSizes(a, b, dir) {
+  const x = knownSize(a);
+  const y = knownSize(b);
+  if (x < 0 || y < 0) return (x < 0) - (y < 0) || collator.compare(a.name, b.name);
+  return ((x - y) || collator.compare(a.name, b.name)) * dir;
+}
+
+function folderSizeText(f) {
+  const s = folderSizes.get(f.path);
+  if (!s || s.error) return '';
+  return (s.partial ? '≥ ' : '') + fmtSize(s.size);
+}
+
+// Linha de baixo do cartão (grade) e coluna "Itens/Tamanho" (lista) de uma subpasta.
+function paintFolderMeta(card, f) {
+  const sub = card.querySelector('.card-sub');
+  const items = card.querySelector('[data-items]');
+  if (!sub || !items) return;
+  const bySize = S.sort.key === 'size';
+  const size = bySize ? folderSizeText(f) : '';
+  // "Vazia" ao lado de "4,8 MB" confunde: a pasta só não tem imagens, vídeos ou subpastas.
+  const peek = card.dataset.peekEmpty && knownSize(f) > 0 ? 'Sem imagens ou vídeos' : card.dataset.peekSub || '';
+  sub.textContent = [size, peek].filter(Boolean).join(' · ') || '\u00a0'; // tamanho antes: não é cortado
+  sub.title = sub.textContent.trim();
+  if (bySize) {
+    const s = folderSizes.get(f.path);
+    items.textContent = size || (s ? '—' : 'Calculando…');
+    items.title = s && s.partial ? 'Algumas subpastas não puderam ser lidas: o tamanho real pode ser maior.' : '';
+  } else {
+    items.textContent = card.dataset.peekItems || '';
+    items.title = '';
+  }
+}
+
+function paintFolderSize(f) {
+  const i = S.folders.indexOf(f);
+  if (i >= 0 && S.items[i]) paintFolderMeta(S.items[i], f);
+}
+
+function updateSizeProgress() {
+  const box = $('#sizeProgress');
+  if (!box) return;
+  const job = sizeJob;
+  box.hidden = !job;
+  if (job) box.lastElementChild.textContent = `Calculando o tamanho das pastas… ${fmtNumber(job.done)} de ${fmtNumber(job.total)}`;
+}
+
+function cancelSizeJob() {
+  if (!sizeJob) return;
+  sizeJob.ctrl.abort();
+  sizeJob = null;
+  updateSizeProgress();
+}
+
+function ensureFolderSizes() {
+  if (S.page !== 'dir' || !S.dir || S.sort.key !== 'size') { cancelSizeJob(); return; }
+  if (sizeJob && P.same(sizeJob.dir, S.dir.path)) return;
+  cancelSizeJob();
+  const pending = S.dir.folders.filter((f) => !folderSizes.has(f.path));
+  if (!pending.length) return;
+
+  const job = { dir: S.dir.path, ctrl: new AbortController(), total: pending.length, done: 0 };
+  const refresh = sizesRefresh;
+  sizesRefresh = false;
+  sizeJob = job;
+  const worker = async () => {
+    while (pending.length && sizeJob === job) {
+      const f = pending.shift();
+      try {
+        folderSizes.set(f.path, await api.dirSize(f.path, refresh, job.ctrl.signal));
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        folderSizes.set(f.path, { error: err.code || 'error' });
+      }
+      if (sizeJob !== job) return;
+      job.done++;
+      paintFolderSize(f);
+      updateSizeProgress();
+    }
+  };
+  Promise.all([worker(), worker(), worker()]).then(() => {
+    if (sizeJob !== job) return;
+    sizeJob = null;
+    renderSections(); // todos os tamanhos prontos: refaz a ordem
+  });
 }
 
 /* ============================================================ seleção */
@@ -976,6 +1085,7 @@ function updateTitle(f) {
 
 function showHome() {
   disconnectObservers();
+  cancelSizeJob();
   endPathEdit();
   S.page = 'home';
   S.dir = null;
@@ -1084,6 +1194,7 @@ function renderHome() {
 
 function showError(err, target) {
   disconnectObservers();
+  cancelSizeJob();
   endPathEdit();
   S.page = 'error';
   S.dir = null;
@@ -1337,7 +1448,15 @@ async function softRefresh({ silent = false } = {}) {
 function refresh() {
   if (S.page === 'dir') {
     peekCache.clear();
-    softRefresh({ silent: false });
+    cancelSizeJob();
+    folderSizes.clear();
+    sizesRefresh = true;
+    softRefresh({ silent: false }).then(() => {
+      if (S.page !== 'dir') return;
+      S.folders.forEach((f) => paintFolderSize(f));
+      ensureFolderSizes();
+      updateSizeProgress();
+    });
   } else if (S.page === 'home') {
     loadHome(true).then(() => toast('Unidades atualizadas', 'success', 1800));
   } else {

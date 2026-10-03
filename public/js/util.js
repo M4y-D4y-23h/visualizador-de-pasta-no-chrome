@@ -90,9 +90,27 @@ export function errorMessage(err) {
   return (err && err.message) || 'Algo deu errado.';
 }
 
+// A API de área de transferência só existe em localhost/HTTPS; pelo endereço do
+// Tailscale (http://100.x.y.z) usa o método antigo.
+function copyFallback(text) {
+  const prev = document.activeElement;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand('copy');
+  ta.remove();
+  if (prev && prev.focus) prev.focus({ preventScroll: true });
+  if (!ok) throw new Error('cópia recusada');
+}
+
 export async function copyText(text) {
   try {
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+    else copyFallback(text);
     toast('Caminho copiado', 'success', 2000);
   } catch {
     toast('Não foi possível copiar', 'error');

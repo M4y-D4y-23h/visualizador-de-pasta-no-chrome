@@ -93,6 +93,45 @@ Somente pastas, **imagens** e **vídeos** aparecem; os demais arquivos são igno
 HEIC, TIFF, AVI, WMV, FLV, MPEG, 3GP e MTS também aparecem na lista, mas o Chrome não consegue
 exibi-los; para esses, o visualizador oferece **Abrir no aplicativo padrão** do Windows.
 
+## Acesso de outro computador (Tailscale)
+
+Dá para ver as pastas de um computador a partir de outro, com os dois no
+[Tailscale](https://tailscale.com) na mesma conta.
+
+1. No computador que tem os arquivos, abra **`Iniciar Visualizador (Tailscale).bat`** (em vez do
+   normal). Se o visualizador já estiver aberto, feche a janela preta dele antes.
+2. Na primeira vez, o Windows pode perguntar sobre o Firewall: clique em **Permitir acesso**.
+3. A janela preta mostra o endereço para usar no outro computador, por exemplo:
+
+   ```
+      Nos outros aparelhos da sua rede Tailscale, abra:
+                 http://100.93.17.99:4321/
+                 http://meupc:4321/
+   ```
+
+4. No outro computador, abra esse endereço no Chrome. O endereço com o nome (`http://meupc:4321/`)
+   funciona quando o MagicDNS do Tailscale está ativo, o que já é o padrão.
+
+Só aparelhos da sua rede Tailscale conseguem se conectar: a rede local (Wi-Fi/cabo) e a internet
+continuam sem acesso, e o Tailscale criptografa a conexão. Quem acessar vê as imagens, os vídeos e
+os nomes das pastas desse computador, então não compartilhe essa máquina no Tailscale com quem não
+deve vê-los.
+
+No outro computador, **Escolher pasta…**, **Abrir no aplicativo padrão** e **Mostrar no Explorer**
+não aparecem, porque abririam janelas no computador remoto. Navegue pela barra lateral ou cole um
+caminho; para formatos que o Chrome não exibe (HEIC, AVI…), use **Baixar**.
+
+**Não abre no outro computador?**
+
+- Confira se a janela preta mostra o endereço do Tailscale, e não "aguardando a conexão".
+- Se alguém clicou em **Cancelar** na pergunta do Firewall, o Windows bloqueia o Node.js (a janela
+  preta avisa). Para liberar: no menu Iniciar, pesquise "Permitir um aplicativo" › **Alterar
+  configurações** › marque **Node.js JavaScript Runtime** na coluna **Privada** › OK.
+- Teste a conexão entre as máquinas: no outro computador, rode `tailscale ping 100.93.17.99`
+  (com o IP mostrado na janela preta).
+- Se você configurou regras de acesso (ACLs) no painel do Tailscale, elas precisam liberar a
+  porta 4321.
+
 ## Opções avançadas
 
 Podem ser passadas ao `.bat` (por exemplo, num atalho: `"Iniciar Visualizador.bat" --atualizar`):
@@ -105,3 +144,4 @@ Podem ser passadas ao `.bat` (por exemplo, num atalho: `"Iniciar Visualizador.ba
 | `--somente-preparar` | Instala/atualiza as dependências e não abre o visualizador |
 | `--port=5000` | Usa outra porta |
 | `--no-open` | Não abre o navegador automaticamente |
+| `--tailscale` | Também aceita acesso dos outros aparelhos da sua rede Tailscale (é o que o `Iniciar Visualizador (Tailscale).bat` usa) |

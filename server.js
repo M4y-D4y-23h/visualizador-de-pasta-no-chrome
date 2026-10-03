@@ -7,7 +7,9 @@
  *   - transmitir imagens e vídeos do disco (com suporte a Range, para vídeos);
  *   - abrir o seletor de pastas do Windows, o aplicativo padrão e o Explorer.
  *
- * Escuta apenas em 127.0.0.1 (e ::1): nada fica exposto na rede.
+ * Escuta apenas em 127.0.0.1 (e ::1): nada fica exposto na rede. Com --tailscale,
+ * também atende nos endereços do Tailscale deste computador, e somente a outros
+ * aparelhos da mesma rede Tailscale (veja "Acesso pelo Tailscale" abaixo).
  */
 
 const http = require('http');
@@ -15,7 +17,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const { pipeline } = require('stream');
 const { fileURLToPath } = require('url');
 
@@ -27,6 +29,7 @@ const SCRIPTS_DIR = path.join(__dirname, 'scripts');
 
 const argv = process.argv.slice(2);
 const NO_OPEN = argv.includes('--no-open');
+const TAILSCALE = argv.includes('--tailscale');
 const portArg = argv.find((a) => a.startsWith('--port='));
 const BASE_PORT = Number(portArg ? portArg.slice('--port='.length) : process.env.PORT) || 4321;
 let PORT = BASE_PORT;
@@ -276,13 +279,32 @@ function fsErrorInfo(err) {
 
 /* ------------------------------------------------------- HTTP: utilitários */
 
+// Nomes e endereços do Tailscale deste computador (preenchido só com --tailscale).
+const tailscaleHosts = new Set();
+
+const hostWithPort = (h) => (h.includes(':') ? `[${h}]:${PORT}` : `${h}:${PORT}`);
+
 function allowedHosts() {
-  return new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
+  return new Set([
+    `localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`,
+    ...Array.from(tailscaleHosts, hostWithPort),
+  ]);
 }
 
-// Bloqueia DNS rebinding: só aceita requisições endereçadas ao próprio servidor local.
+// Bloqueia DNS rebinding: só aceita requisições endereçadas ao próprio servidor
+// (localhost ou, com --tailscale, o endereço/nome deste computador no Tailscale).
 function hostAllowed(req) {
   return allowedHosts().has(String(req.headers.host || '').toLowerCase());
+}
+
+// "::ffff:100.64.1.2" -> "100.64.1.2"
+const plainAddress = (ip) => String(ip || '').replace(/^::ffff:/i, '');
+
+// Quem está usando o visualizador neste próprio computador (e não por outro aparelho
+// do Tailscale)? Só esse pode abrir janelas e programas aqui.
+function isLocalClient(req) {
+  const ip = plainAddress(req.socket.remoteAddress);
+  return ip === '::1' || ip.startsWith('127.') || tailscaleServers.has(ip);
 }
 
 // Requisições que executam ações exigem um cabeçalho próprio e JSON: navegadores não
@@ -540,7 +562,11 @@ async function apiPeek(res, raw) {
   }
 }
 
-async function apiFile(req, res, raw) {
+// RFC 8187: além do que encodeURIComponent já codifica, ' ( ) * também precisam ser.
+const encodeFilename = (name) => encodeURIComponent(name)
+  .replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+
+async function apiFile(req, res, raw, download) {
   const target = normalizePath(raw);
   const media = target && mediaOf(path.basename(target));
   if (!media) return sendError(res, 403, 'not_media', 'Somente imagens e vídeos podem ser abertos.');
@@ -562,7 +588,8 @@ async function apiFile(req, res, raw) {
     ETag: etag,
     'Last-Modified': st.mtime.toUTCString(),
     'Cache-Control': 'private, max-age=86400',
-    'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`,
+    // download=1: "Baixar", usado por quem acessa de outro computador.
+    'Content-Disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeFilename(path.basename(target))}`,
     'X-Content-Type-Options': 'nosniff',
     // Se um SVG for aberto diretamente numa aba, nenhum script dele roda.
     'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; media-src 'self'; sandbox",
@@ -671,6 +698,11 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'POST') {
     if (!postAllowed(req)) return sendError(res, 403, 'forbidden', 'Requisição recusada.');
+    // Seletor de pastas e "abrir no aplicativo padrão" abririam janelas no computador
+    // do servidor, não no de quem está acessando pelo Tailscale.
+    if (!isLocalClient(req)) {
+      return sendError(res, 403, 'remote', 'Esta ação só funciona no computador onde o visualizador está rodando.');
+    }
     if (route === 'pick') return apiPick(req, res);
     if (route === 'open') return apiOpen(req, res);
     return sendError(res, 404, 'not_found', 'Rota desconhecida.');
@@ -681,6 +713,7 @@ async function handleApi(req, res, url) {
     case 'info':
       return sendJson(res, 200, {
         app: APP_ID, version: VERSION, platform: process.platform, sep: path.sep, home: os.homedir(),
+        tailscale: TAILSCALE, remote: !isLocalClient(req),
       });
     case 'home':
       return sendJson(res, 200, await getHome(q.get('refresh') === '1'));
@@ -689,7 +722,7 @@ async function handleApi(req, res, url) {
     case 'peek':
       return apiPeek(res, q.get('path'));
     case 'file':
-      return apiFile(req, res, q.get('path'));
+      return apiFile(req, res, q.get('path'), q.get('download') === '1');
     default:
       return sendError(res, 404, 'not_found', 'Rota desconhecida.');
   }
@@ -809,7 +842,135 @@ function openBrowser(url) {
   }
 }
 
-function isOurServer(port) {
+/* ------------------------------------------------------ acesso pelo Tailscale */
+
+// Com --tailscale, o servidor também escuta nos endereços deste computador na rede
+// Tailscale e só aceita conexões vindas de aparelhos dessa rede. A rede local
+// (Wi-Fi/cabo) e a internet continuam sem acesso.
+
+const isTailscaleIPv4 = (ip) => {
+  const m = /^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(ip);
+  return !!m && Number(m[1]) >= 64 && Number(m[1]) <= 127; // 100.64.0.0/10
+};
+const isTailscaleIPv6 = (ip) => /^fd7a:115c:a1e0:/i.test(ip); // fd7a:115c:a1e0::/48
+const isTailscaleAddress = (ip) => isTailscaleIPv4(ip) || isTailscaleIPv6(ip);
+
+// Endereços deste computador no Tailscale. A interface se chama "Tailscale" no Windows e
+// "tailscale0" no Linux; no macOS (utunN), é reconhecida pelo IPv6 próprio do Tailscale.
+// Exigir a interface evita confundir com a faixa 100.64.0.0/10 usada por algumas operadoras.
+function findTailscaleAddresses() {
+  let ifaces;
+  try { ifaces = os.networkInterfaces(); } catch { return []; }
+  const found = [];
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    const list = addrs || [];
+    if (!/tailscale/i.test(name) && !list.some((a) => isTailscaleIPv6(a.address))) continue;
+    for (const a of list) if (isTailscaleAddress(a.address)) found.push(a.address.toLowerCase());
+  }
+  return found;
+}
+
+function tailscaleCli() {
+  const candidates = IS_WIN
+    ? [path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Tailscale', 'tailscale.exe')]
+    : ['/Applications/Tailscale.app/Contents/MacOS/Tailscale'];
+  return candidates.find((c) => fs.existsSync(c)) || 'tailscale';
+}
+
+// Nomes do computador no MagicDNS do Tailscale (ex.: "meupc" e "meupc.tail1234.ts.net").
+// Sem a linha de comando do Tailscale, fica com o nome do computador, que é o padrão dele.
+function findTailscaleNames() {
+  const names = new Set([os.hostname().toLowerCase().split('.')[0]]);
+  return new Promise((resolve) => {
+    execFile(tailscaleCli(), ['status', '--json'],
+      { timeout: 5000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+        if (!err) {
+          try {
+            const dns = String((JSON.parse(stdout).Self || {}).DNSName || '').toLowerCase().replace(/\.$/, '');
+            if (dns) { names.add(dns); names.add(dns.split('.')[0]); }
+          } catch { /* saída inesperada: fica só com o nome do computador */ }
+        }
+        resolve(Array.from(names).filter((n) => /^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(n)));
+      });
+  });
+}
+
+const tailscaleServers = new Map(); // endereço -> servidor
+const tailscaleWarned = new Set();
+
+// Escuta num endereço do Tailscale. Resolve com true/false quando terminar.
+function listenTailscale(addr) {
+  return new Promise((resolve) => {
+    const srv = http.createServer(handler);
+    srv.keepAliveTimeout = 30000;
+    // Defesa extra: mesmo escutando no endereço do Tailscale, recusa quem não veio dele.
+    srv.on('connection', (socket) => {
+      if (!isTailscaleAddress(plainAddress(socket.remoteAddress))) socket.destroy();
+    });
+    srv.on('error', (err) => {
+      if (srv.listening) return;
+      tailscaleServers.delete(addr);
+      tailscaleHosts.delete(addr);
+      // EADDRNOTAVAIL: o endereço acabou de sumir ou ainda não está pronto; tenta de novo depois.
+      const key = `${addr}|${err.code}`;
+      if (err.code !== 'EADDRNOTAVAIL' && !tailscaleWarned.has(key)) {
+        tailscaleWarned.add(key);
+        console.warn(`  [aviso] Não foi possível atender pelo Tailscale em ${addr}: ${err.message}`);
+      }
+      resolve(false);
+    });
+    tailscaleServers.set(addr, srv);
+    tailscaleHosts.add(addr);
+    srv.listen(PORT, addr, () => resolve(true));
+  });
+}
+
+// Acompanha o Tailscale: começa a atender quando ele conecta (mesmo que depois do
+// visualizador) e larga o endereço quando ele desconecta. Devolve os endereços novos.
+let tailscaleSyncing = false;
+async function syncTailscale() {
+  if (tailscaleSyncing) return [];
+  tailscaleSyncing = true;
+  try {
+    const current = findTailscaleAddresses();
+    for (const [addr, srv] of tailscaleServers) {
+      if (current.includes(addr)) continue;
+      srv.close();
+      tailscaleServers.delete(addr);
+      tailscaleHosts.delete(addr);
+    }
+    const added = current.filter((a) => !tailscaleServers.has(a));
+    const ok = await Promise.all(added.map(listenTailscale));
+    const fresh = added.filter((a, i) => ok[i]);
+    if (fresh.length) for (const n of await findTailscaleNames()) tailscaleHosts.add(n);
+    return fresh;
+  } finally {
+    tailscaleSyncing = false;
+  }
+}
+
+// Endereços para mostrar na janela: IPv4 e o nome curto do MagicDNS.
+function tailscaleUrls() {
+  const hosts = [
+    ...Array.from(tailscaleServers.keys()).filter(isTailscaleIPv4),
+    ...Array.from(tailscaleHosts).filter((h) => !isTailscaleAddress(h) && !h.includes('.')),
+  ];
+  return hosts.map((h) => `http://${h}:${PORT}/`);
+}
+
+function watchTailscale() {
+  const timer = setInterval(async () => {
+    if ((await syncTailscale()).length) {
+      console.log(`\n  Tailscale conectado. Nos outros aparelhos, abra: ${tailscaleUrls().join('  ou  ')}\n`);
+    }
+  }, 15000);
+  timer.unref();
+}
+
+/* ---------------------------------------------------------------- início */
+
+// Pergunta ao servidor que já ocupa a porta se ele é o Visualizador (e como está configurado).
+function ourServerInfo(port) {
   return new Promise((resolve) => {
     const req = http.get({
       host: '127.0.0.1', port, path: '/@api/info', timeout: 1500,
@@ -819,11 +980,14 @@ function isOurServer(port) {
       res.setEncoding('utf8');
       res.on('data', (d) => { body += d; });
       res.on('end', () => {
-        try { resolve(JSON.parse(body).app === APP_ID); } catch { resolve(false); }
+        try {
+          const info = JSON.parse(body);
+          resolve(info.app === APP_ID ? info : null);
+        } catch { resolve(null); }
       });
     });
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
   });
 }
 
@@ -834,6 +998,16 @@ function printBanner(url) {
   console.log('   Visualizador de Pastas está rodando!');
   console.log('');
   console.log(`   Endereço:  ${url}`);
+  if (TAILSCALE) {
+    const urls = tailscaleUrls();
+    console.log('');
+    if (urls.length) {
+      console.log('   Nos outros aparelhos da sua rede Tailscale, abra:');
+      for (const u of urls) console.log(`              ${u}`);
+    } else {
+      console.log('   Tailscale: aguardando a conexão (o endereço aparecerá aqui).');
+    }
+  }
   console.log('');
   console.log('   Mantenha esta janela aberta enquanto usa o visualizador.');
   console.log('   Para encerrar, feche esta janela ou pressione Ctrl+C.');
@@ -844,8 +1018,15 @@ function printBanner(url) {
 function start(port, attempt = 0) {
   const onError = async (err) => {
     if (err.code === 'EADDRINUSE') {
-      if (await isOurServer(port)) {
+      const info = await ourServerInfo(port);
+      if (info) {
         const url = `http://localhost:${port}/`;
+        if (TAILSCALE && !info.tailscale) {
+          console.log(`\n  O Visualizador de Pastas já está aberto em ${url}, mas sem o acesso pelo Tailscale.`);
+          console.log('  Feche a janela preta dele e abra "Iniciar Visualizador (Tailscale).bat" de novo.\n');
+          process.exitCode = 1;
+          return;
+        }
         console.log(`\n  O Visualizador de Pastas já está aberto em ${url}\n  Abrindo uma nova aba...\n`);
         openBrowser(url);
         setTimeout(() => process.exit(0), 500);
@@ -860,7 +1041,7 @@ function start(port, attempt = 0) {
     process.exitCode = 1;
   };
   server.once('error', onError);
-  server.listen(port, '127.0.0.1', () => {
+  server.listen(port, '127.0.0.1', async () => {
     server.removeListener('error', onError);
     PORT = port;
     // Também atende em ::1 para que "localhost" responda imediatamente em qualquer configuração.
@@ -868,6 +1049,11 @@ function start(port, attempt = 0) {
     v6.keepAliveTimeout = 30000;
     v6.on('error', () => { /* IPv6 indisponível: sem problema */ });
     v6.listen(port, '::1');
+
+    if (TAILSCALE) {
+      await syncTailscale();
+      watchTailscale();
+    }
 
     const url = `http://localhost:${port}/`;
     printBanner(url);

@@ -19,7 +19,10 @@ const TYPE_NAMES = {
 
 export const typeLabel = (f) => `${f.kind === 'video' ? 'Vídeo' : 'Imagem'} ${TYPE_NAMES[f.ext] || f.ext.toUpperCase()}`;
 
-export function createViewer({ onChange, onRequestClose, onOpenExternal, onReveal, onCopy, revealLabel }) {
+// remote: acesso de outro computador (Tailscale). "Abrir no aplicativo padrão" e
+// "Mostrar no Explorer" agiriam no computador do servidor, então viram "Baixar".
+export function createViewer({ onChange, onRequestClose, onOpenExternal, onReveal, onCopy, revealLabel, remote }) {
+  const DOWNLOAD_LABEL = 'Baixar para este computador';
   const root = document.getElementById('viewer');
   root.setAttribute('role', 'dialog');
   root.setAttribute('aria-modal', 'true');
@@ -44,8 +47,10 @@ export function createViewer({ onChange, onRequestClose, onOpenExternal, onRevea
           <span class="v-divider"></span>
         </div>
         <button class="v-btn" type="button" data-act="info" title="Informações (I)">${icon('info')}</button>
-        <button class="v-btn" type="button" data-act="external" title="Abrir no aplicativo padrão">${icon('external')}</button>
-        <button class="v-btn" type="button" data-act="reveal" title="${esc(revealLabel)}">${icon('folderSearch')}</button>
+        ${remote
+          ? `<button class="v-btn" type="button" data-act="download" title="${DOWNLOAD_LABEL}">${icon('download')}</button>`
+          : `<button class="v-btn" type="button" data-act="external" title="Abrir no aplicativo padrão">${icon('external')}</button>
+        <button class="v-btn" type="button" data-act="reveal" title="${esc(revealLabel)}">${icon('folderSearch')}</button>`}
         <button class="v-btn" type="button" data-act="fullscreen" title="Tela cheia (F)">${icon('maximize')}</button>
         <span class="v-divider"></span>
         <button class="v-btn v-close" type="button" data-act="close" title="Fechar (Esc)">${icon('x')}</button>
@@ -234,7 +239,7 @@ export function createViewer({ onChange, onRequestClose, onOpenExternal, onRevea
       stopSpin();
       if (!v.videoWidth) {
         showNote('O Chrome não conseguiu decodificar a imagem deste vídeo (codec não suportado). '
-          + 'Somente o áudio será reproduzido — use “Abrir no aplicativo padrão” para assisti-lo.');
+          + `Somente o áudio será reproduzido — use “${remote ? 'Baixar' : 'Abrir no aplicativo padrão'}” para assisti-lo.`);
       }
       renderInfo();
     });
@@ -254,17 +259,19 @@ export function createViewer({ onChange, onRequestClose, onOpenExternal, onRevea
     const isImg = f.kind === 'image';
     const title = isImg ? 'Não foi possível exibir esta imagem' : 'Não foi possível reproduzir este vídeo';
     const fmt = UNSUPPORTED[f.ext];
+    const how = remote ? 'Baixe o arquivo e abra-o em um aplicativo deste computador' : 'Abra no aplicativo padrão do computador';
     const text = fmt
-      ? `O Google Chrome não ${isImg ? 'exibe imagens' : 'reproduz vídeos'} no formato ${fmt}. Abra no aplicativo padrão do computador para ${isImg ? 'vê-la' : 'assisti-lo'}.`
+      ? `O Google Chrome não ${isImg ? 'exibe imagens' : 'reproduz vídeos'} no formato ${fmt}. ${how} para ${isImg ? 'vê-la' : 'assisti-lo'}.`
       : `O arquivo pode estar corrompido ou usar um ${isImg ? 'formato' : 'codec'} que o Chrome não suporta.`;
     msg.innerHTML = `
       <div class="v-msg-card">
         <div class="v-msg-icon">${icon(isImg ? 'imageOff' : 'video')}</div>
         <h3>${title}</h3>
         <p>${esc(text)}</p>
-        <div class="v-msg-actions">
-          <button class="btn btn-primary" type="button" data-act="external">${icon('external')}Abrir no aplicativo padrão</button>
-          <button class="btn btn-dark" type="button" data-act="reveal">${icon('folderSearch')}${esc(revealLabel)}</button>
+        <div class="v-msg-actions">${remote
+          ? `<button class="btn btn-primary" type="button" data-act="download">${icon('download')}${DOWNLOAD_LABEL}</button>`
+          : `<button class="btn btn-primary" type="button" data-act="external">${icon('external')}Abrir no aplicativo padrão</button>
+          <button class="btn btn-dark" type="button" data-act="reveal">${icon('folderSearch')}${esc(revealLabel)}</button>`}
         </div>
       </div>`;
     msg.hidden = false;
@@ -491,6 +498,15 @@ export function createViewer({ onChange, onRequestClose, onOpenExternal, onRevea
     if (b) goTo(Number(b.dataset.i));
   });
 
+  function download(f) {
+    const a = document.createElement('a');
+    a.href = fileSrc(f) + '&download=1';
+    a.download = f.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
   /* ---------------------------------------------------------- informações */
 
   function renderInfo() {
@@ -527,7 +543,9 @@ export function createViewer({ onChange, onRequestClose, onOpenExternal, onRevea
       <dl class="v-info-list">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
       <div class="v-info-actions">
         <button class="btn btn-dark btn-sm" type="button" data-act="copy">${icon('copy')}Copiar caminho</button>
-        <button class="btn btn-dark btn-sm" type="button" data-act="reveal">${icon('folderSearch')}${esc(revealLabel)}</button>
+        ${remote
+          ? `<button class="btn btn-dark btn-sm" type="button" data-act="download">${icon('download')}Baixar</button>`
+          : `<button class="btn btn-dark btn-sm" type="button" data-act="reveal">${icon('folderSearch')}${esc(revealLabel)}</button>`}
       </div>`;
   }
 
@@ -566,6 +584,7 @@ export function createViewer({ onChange, onRequestClose, onOpenExternal, onRevea
       case 'fullscreen': toggleFullscreen(); break;
       case 'external': if (f) onOpenExternal(f); break;
       case 'reveal': if (f) onReveal(f); break;
+      case 'download': if (f) download(f); break;
       case 'copy': if (f) onCopy(f.path); break;
       default: break;
     }

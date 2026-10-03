@@ -82,6 +82,8 @@ const S = {
 
 let viewer = null;
 const isWin = () => P.isWin();
+// Acessando de outro computador (pelo Tailscale): janelas e programas abririam lá, não aqui.
+const isRemote = () => !!(S.info && S.info.remote);
 
 /* =================================================================== início */
 
@@ -103,6 +105,7 @@ async function init() {
     return;
   }
   P.setPlatform(S.info.platform);
+  el.pickBtn.hidden = isRemote();
 
   viewer = createViewer({
     onChange: onViewerChange,
@@ -111,6 +114,7 @@ async function init() {
     onReveal: (f) => reveal(f.path),
     onCopy: (p) => copyText(p),
     revealLabel: isWin() ? 'Mostrar no Explorer' : 'Mostrar na pasta',
+    remote: isRemote(),
   });
 
   history.scrollRestoration = 'manual';
@@ -423,10 +427,10 @@ function renderFolderHead() {
       <button class="btn btn-ghost${fav ? ' is-on' : ''}" type="button" data-act="fav"
               title="${fav ? 'Remover dos favoritos' : 'Fixar esta pasta na barra lateral'}">
         ${icon(fav ? 'starFill' : 'star')}<span>${fav ? 'Favorita' : 'Favoritar'}</span>
-      </button>
+      </button>${isRemote() ? '' : `
       <button class="btn btn-ghost" type="button" data-act="explorer" title="Abrir esta pasta ${isWin() ? 'no Explorer' : 'no gerenciador de arquivos'}">
         ${icon('external')}<span>${isWin() ? 'Abrir no Explorer' : 'Abrir pasta'}</span>
-      </button>
+      </button>`}
     </div>`;
 }
 
@@ -1027,12 +1031,12 @@ function renderHome() {
     <div class="page page-home">
       <section class="hero">
         <div class="hero-text">
-          <span class="hero-eyebrow">${icon('sparkles')}Imagens e vídeos do seu computador</span>
+          <span class="hero-eyebrow">${icon('sparkles')}${isRemote() ? 'Imagens e vídeos do computador remoto' : 'Imagens e vídeos do seu computador'}</span>
           <h1>Escolha uma pasta para começar</h1>
           <p>Navegue pelas subpastas, veja tudo em uma grade organizada e clique em um arquivo para visualizá-lo.
              Para voltar, use <kbd>Backspace</kbd> ou o botão Voltar do navegador.</p>
           <div class="hero-actions">
-            <button class="btn btn-primary btn-lg" type="button" data-act="pick">${icon('folderPlus')}Escolher pasta…</button>
+            ${isRemote() ? '' : `<button class="btn btn-primary btn-lg" type="button" data-act="pick">${icon('folderPlus')}Escolher pasta…</button>`}
             <form class="hero-path" data-form="path" autocomplete="off">
               ${icon('folder')}
               <input name="p" type="text" spellcheck="false" placeholder="ou cole um caminho, ex.: ${esc(example)}" aria-label="Caminho de uma pasta">
@@ -1269,7 +1273,7 @@ function recordRecent(d) {
 
 async function pickFolder() {
   if (S.picking) return;
-  if (!isWin()) {
+  if (!isWin() || isRemote()) {
     toast('Use a barra lateral para navegar pelas unidades ou cole um caminho no campo de endereço.');
     return;
   }

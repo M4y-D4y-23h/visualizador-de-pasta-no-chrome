@@ -10,7 +10,7 @@
 #   --sem-atualizar      não procura atualizações nesta execução
 #   --simular            mostra o que seria instalado/atualizado, sem alterar nada
 #   --somente-preparar   prepara tudo e não inicia o servidor
-# As demais opções (ex.: --port=5000, --no-open) são repassadas ao servidor.
+# As demais opções (ex.: --port=5000, --no-open, --tailscale) são repassadas ao servidor.
 #
 # Salvo em UTF-8 com BOM: o Windows PowerShell 5.1 precisa disso para os acentos.
 
@@ -200,6 +200,31 @@ if ($somentePreparar -or $simular) {
     Write-Host ''
     Escrever-Ok 'Tudo pronto.'
     exit 0
+}
+
+# ---------------------------------------------------- acesso pelo Tailscale
+
+# Na primeira vez, o Firewall do Windows pergunta se o Node.js pode receber conexões.
+# Se alguém clicou em "Cancelar", o Windows criou regras de bloqueio, que valem mais que
+# qualquer permissão, e os outros aparelhos não conseguiriam se conectar. Aqui só avisa.
+if ($argsServidor -contains '--tailscale') {
+    Escrever-Etapa 'Acesso pelo Tailscale'
+    $bloqueios = @()
+    try {
+        $nodeCompleto = [IO.Path]::GetFullPath($nodeExe)
+        $bloqueios = @(Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True -ErrorAction Stop |
+            Where-Object {
+                $programa = ($_ | Get-NetFirewallApplicationFilter).Program
+                $programa -and ([Environment]::ExpandEnvironmentVariables($programa) -ieq $nodeCompleto)
+            })
+    } catch { }  # nenhuma regra de bloqueio (ou firewall inacessível): segue normalmente
+    if ($bloqueios.Count) {
+        Escrever-Aviso 'O Firewall do Windows está bloqueando o Node.js: os outros aparelhos não vão conseguir abrir o visualizador.'
+        Escrever-Info 'Para liberar: no menu Iniciar, pesquise "Permitir um aplicativo" > Alterar configurações >'
+        Escrever-Info 'marque "Node.js JavaScript Runtime" na coluna "Privada" > OK. Depois, abra este atalho de novo.'
+    } else {
+        Escrever-Info 'Se o Windows perguntar sobre o Firewall, clique em "Permitir" (redes privadas).'
+    }
 }
 
 & $nodeExe (Join-Path $raiz 'server.js') @argsServidor

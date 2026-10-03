@@ -1,0 +1,31 @@
+{
+  "_sobre": "Programas de que o Visualizador precisa. Ao abrir o 'Iniciar Visualizador.bat', os que faltam (ou estão abaixo de 'versaoMinima') são instalados, e os marcados com 'atualizar': true são atualizados no máximo uma vez a cada 'verificarAtualizacoesACadaHoras'. Para uma dependência nova, adicione um item com 'fonte': 'winget' e o 'id' do pacote (veja com: winget search nome). Pacotes JavaScript ficam no package.json e também são instalados automaticamente.",
+  "verificarAtualizacoesACadaHoras": 24,
+  "programas": [
+    {
+      "nome": "Node.js",
+      "fonte": "nodejs",
+      "comando": "node",
+      "argumentoVersao": "--version",
+      "caminhos": ["%ProgramFiles%\\nodejs\\node.exe"],
+      "versaoMinima": "18.0.0",
+      "obrigatorio": true,
+      "atualizar": true,
+      "site": "https://nodejs.org"
+    },
+    {
+      "nome": "Google Chrome",
+      "fonte": "winget",
+      "id": "Google.Chrome",
+      "caminhos": [
+        "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
+        "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe",
+        "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe"
+      ],
+      "obrigatorio": false,
+      "atualizar": false,
+      "site": "https://www.google.com/chrome",
+      "semEle": "O visualizador abrirá no navegador padrão. (O Chrome se atualiza sozinho.)"
+    }
+  ]
+}

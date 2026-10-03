@@ -1,0 +1,13 @@
+{
+  "name": "visualizador-de-pastas",
+  "version": "1.0.0",
+  "description": "Visualizador local de pastas, imagens e vídeos que roda no Google Chrome.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

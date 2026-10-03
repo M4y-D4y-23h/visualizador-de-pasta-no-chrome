@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Visualizador de Pastas</title>
+  <link rel="icon" href="/@app/icon.svg" type="image/svg+xml">
+  <script src="/@app/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/@app/css/app.css">
+  <script type="module" src="/@app/js/app.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar" aria-label="Navegação">
+      <div class="brand">
+        <img class="brand-logo" src="/@app/icon.svg" alt="" width="34" height="34">
+        <div class="brand-text">
+          <div class="brand-name">Visualizador</div>
+          <div class="brand-sub">de pastas</div>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-block" id="pickBtn" type="button"></button>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-foot">
+        <button class="icon-btn" id="themeBtn" type="button"></button>
+        <button class="icon-btn" id="helpBtn" type="button"></button>
+        <span class="sidebar-hint"><kbd>?</kbd> atalhos</span>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn" id="menuBtn" type="button"></button>
+        <div class="nav-btns">
+          <button class="icon-btn" id="backBtn" type="button"></button>
+          <button class="icon-btn" id="fwdBtn" type="button"></button>
+          <button class="icon-btn" id="upBtn" type="button"></button>
+          <button class="icon-btn" id="refreshBtn" type="button"></button>
+        </div>
+        <div class="pathbar" id="pathbar">
+          <div class="crumbs" id="crumbs"></div>
+          <input class="path-input" id="pathInput" type="text" spellcheck="false" autocomplete="off"
+                 aria-label="Caminho da pasta" hidden>
+          <button class="pathbar-edit" id="pathEditBtn" type="button"></button>
+        </div>
+        <label class="search" id="searchBox">
+          <span class="search-icon" id="searchIcon"></span>
+          <input id="search" type="search" placeholder="Buscar nesta pasta" autocomplete="off" spellcheck="false"
+                 aria-label="Buscar nesta pasta">
+          <kbd class="search-kbd">/</kbd>
+        </label>
+      </header>
+      <div class="progress" id="progress" aria-hidden="true"></div>
+      <main class="content" id="content" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <div class="viewer" id="viewer" hidden></div>
+
+  <div class="modal" id="helpModal" hidden>
+    <div class="modal-card modal-wide" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <div class="modal-head">
+        <h2 id="helpTitle">Atalhos do teclado</h2>
+        <button class="icon-btn" data-close type="button" aria-label="Fechar"></button>
+      </div>
+      <div class="help-grid" id="helpBody"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="pickModal" hidden>
+    <div class="modal-card modal-center" role="dialog" aria-modal="true" aria-labelledby="pickTitle">
+      <div class="spinner spinner-lg"></div>
+      <h2 id="pickTitle">Escolha a pasta na janela do Windows</h2>
+      <p class="muted">A janela de seleção foi aberta. Se você não a vir, ela pode estar atrás do Chrome —
+        procure-a na barra de tarefas.</p>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

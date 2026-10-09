@@ -924,6 +924,32 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .ftile-play .i { width: 9px; height: 9px; }
 
+/* baixar a subpasta inteira (.zip) sem entrar nela: aparece ao passar o mouse */
+.card-dl {
+  position: absolute;
+  top: 22px;   /* dentro da capa: respiro do cartão + aba da pasta + 8px */
+  right: 14px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: rgba(10, 12, 16, .62);
+  color: #fff;
+  opacity: 0;
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  transition: opacity .15s, background .15s;
+}
+.card-dl .i { width: 17px; height: 17px; }
+.card:hover .card-dl { opacity: 1; }
+.card-dl:hover { background: var(--accent); }
+.card.no-zip .card-dl { display: none; }
+@media (hover: none) {
+  .card-dl { opacity: 1; }
+}
+
 .note {
   display: flex;
   align-items: center;
@@ -997,6 +1023,15 @@ button.lh:hover, .lh.on { color: var(--text); }
   white-space: nowrap;
 }
 .sections.is-list .col-size { text-align: right; }
+.sections.is-list .card-dl {
+  top: calc(50% - 15px);
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  background: var(--surface-3);
+  color: var(--text);
+}
+.sections.is-list .card-dl:hover { background: var(--accent); color: #fff; }
 
 /* estados vazios e erros */
 

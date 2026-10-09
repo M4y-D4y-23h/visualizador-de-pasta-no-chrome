@@ -1,5 +1,5 @@
 // Visualizador de Pastas — interface principal.
-import { api } from './api.js';
+import { api, zipSrc } from './api.js';
 import { icon } from './icons.js';
 import * as P from './paths.js';
 import {
@@ -427,7 +427,10 @@ function renderFolderHead() {
       <button class="btn btn-ghost${fav ? ' is-on' : ''}" type="button" data-act="fav"
               title="${fav ? 'Remover dos favoritos' : 'Fixar esta pasta na barra lateral'}">
         ${icon(fav ? 'starFill' : 'star')}<span>${fav ? 'Favorita' : 'Favoritar'}</span>
-      </button>${isRemote() ? '' : `
+      </button>${d.files.length || d.folders.length ? `
+      <button class="btn btn-ghost" type="button" data-act="zip" title="Baixar todas as imagens e vídeos desta pasta e das subpastas, num arquivo .zip">
+        ${icon('download')}<span>Baixar tudo</span>
+      </button>` : ''}${isRemote() ? '' : `
       <button class="btn btn-ghost" type="button" data-act="explorer" title="Abrir esta pasta ${isWin() ? 'no Explorer' : 'no gerenciador de arquivos'}">
         ${icon('external')}<span>${isWin() ? 'Abrir no Explorer' : 'Abrir pasta'}</span>
       </button>`}
@@ -543,6 +546,7 @@ function listHead(kind) {
 function folderCard(f, i) {
   return `<a class="card card-folder" href="${esc(P.dirUrl(f.path))}" data-idx="${i}" tabindex="${i ? -1 : 0}" title="${esc(f.name)}" draggable="false">
       <div class="fcover"><div class="fmosaic"></div><span class="fcover-icon">${icon('folder')}</span></div>
+      <span class="card-dl" data-zip="${esc(f.path)}" title="Baixar “${esc(f.name)}” inteira, com as subpastas (.zip)" aria-hidden="true">${icon('download')}</span>
       <div class="card-text">
         <span class="card-name">${esc(f.name)}</span>
         <span class="card-sub">&nbsp;</span>
@@ -748,6 +752,7 @@ function applyPeek(card, p, f, track) {
     const t = p.error === 'forbidden' ? 'Sem acesso' : 'Indisponível';
     card.dataset.peekSub = t;
     card.dataset.peekItems = t;
+    card.classList.add('no-zip');
     paintFolderMeta(card, f);
     cover.classList.add('is-locked');
     cover.querySelector('.fcover-icon').innerHTML = icon('lock');
@@ -761,6 +766,7 @@ function applyPeek(card, p, f, track) {
   card.dataset.peekSub = parts.length ? parts.join(' · ') : 'Vazia';
   card.dataset.peekItems = total ? plural(total, 'item', 'itens') : 'Vazia';
   card.dataset.peekEmpty = total ? '' : '1';
+  card.classList.toggle('no-zip', !total);
   paintFolderMeta(card, f);
   cover.classList.toggle('is-empty', !total);
 
@@ -1425,6 +1431,32 @@ async function reveal(p) {
   }
 }
 
+// Baixa a pasta inteira, com as subpastas, num .zip que o servidor monta enquanto envia.
+// Antes, confere se há imagens ou vídeos e se a pasta abre: assim um problema aparece aqui
+// como aviso, e não como um download que falhou no Chrome.
+const zipPending = new Set();
+
+async function downloadFolder(p) {
+  if (!p || zipPending.has(p)) return; // clique duplo
+  zipPending.add(p);
+  const slow = setTimeout(() => toast('Procurando as imagens e os vídeos da pasta…', 'info', 2500), 600);
+  try {
+    const { name } = await api.zipCheck(p);
+    const a = document.createElement('a');
+    a.href = zipSrc(p);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast(`Baixando “${name}”, com as imagens e os vídeos da pasta e das subpastas`, 'success', 4500);
+  } catch (err) {
+    toast(errorMessage(err), 'error', 5000);
+  } finally {
+    clearTimeout(slow);
+    zipPending.delete(p);
+  }
+}
+
 async function softRefresh({ silent = false } = {}) {
   if (S.page !== 'dir' || !S.dir || S.refreshing || (viewer && viewer.isOpen())) return;
   S.refreshing = true;
@@ -1618,6 +1650,14 @@ function bindEvents() {
       return;
     }
 
+    // Botão de baixar dentro do cartão da subpasta: baixa em vez de abrir.
+    const zip = e.target.closest('[data-zip]');
+    if (zip) {
+      e.preventDefault();
+      downloadFolder(zip.dataset.zip);
+      return;
+    }
+
     const a = e.target.closest('a[href]');
     if (a && !e.defaultPrevented) {
       if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; // nova aba/janela
@@ -1646,6 +1686,7 @@ function bindEvents() {
       switch (b.dataset.act) {
         case 'pick': pickFolder(); break;
         case 'fav': toggleFavorite(); break;
+        case 'zip': if (S.dir) downloadFolder(S.dir.path); break;
         case 'explorer': if (S.dir) openExternal(S.dir.path); break;
         case 'up': goUp(); break;
         case 'home': goHome(); break;

@@ -6,6 +6,7 @@
  *   - listar pastas (somente subpastas, imagens e vídeos);
  *   - transmitir imagens e vídeos do disco (com suporte a Range, para vídeos);
  *   - gerar miniaturas das imagens (com o pacote opcional "sharp"; veja "Miniaturas");
+ *   - baixar uma pasta inteira, com as subpastas, num .zip (veja "Baixar uma pasta");
  *   - abrir o seletor de pastas do Windows, o aplicativo padrão e o Explorer.
  *
  * Escuta apenas em 127.0.0.1 (e ::1): nada fica exposto na rede. Com --tailscale,
@@ -24,6 +25,8 @@ const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const zlib = require('zlib');
+const { once } = require('events');
 const { spawn, execFile } = require('child_process');
 const { pipeline } = require('stream');
 const { fileURLToPath } = require('url');
@@ -1078,6 +1081,375 @@ async function apiFile(req, res, raw, download) {
   pipeline(stream, res, () => { /* cliente cancelou (ex.: ao avançar um vídeo) — normal */ });
 }
 
+/* ------------------------------------------------------- baixar uma pasta */
+
+// "Baixar tudo": as imagens e os vídeos de uma pasta e de todas as subpastas dela num só
+// .zip, montado enquanto é enviado (nada é gravado em disco nem acumulado na memória, e o
+// download começa na hora). Entram os mesmos arquivos que o visualizador mostra: somente
+// imagens e vídeos, sem itens ocultos ou de sistema. Sem compressão: fotos e vídeos já vêm
+// comprimidos, e comprimir de novo só gastaria processador. Arquivos de 4 GB ou mais e zips
+// muito grandes usam a extensão ZIP64, que o Windows, o 7-Zip e o macOS abrem normalmente.
+
+const ZIP_MAX32 = 0xffffffff;
+const ZIP_FLAGS = 0x0808; // CRC e tamanhos depois dos dados (bit 3) e nomes em UTF-8 (bit 11)
+const ZIP_SKIPPED_NAME = 'ARQUIVOS NÃO INCLUÍDOS.txt';
+
+// CRC-32 exigido pelo zip: nativo a partir do Node 20.15/22.2; antes disso, em JavaScript.
+let crcTable = null;
+function crc32js(buf, prev = 0) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let c = ~prev;
+  for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return ~c >>> 0;
+}
+const crc32 = typeof zlib.crc32 === 'function' ? zlib.crc32 : crc32js;
+
+// Data de modificação no formato do zip (MS-DOS: hora local, de 1980 a 2107).
+function dosDateTime(ms) {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  if (!(y >= 1980)) return { date: (1 << 5) | 1, time: 0 }; // 01/01/1980 (ou data inválida)
+  if (y > 2107) return { date: (127 << 9) | (12 << 5) | 31, time: (23 << 11) | (59 << 5) | 29 };
+  return {
+    date: ((y - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+  };
+}
+
+// Campo extra ZIP64 (0x0001): os valores de 64 bits que não cabem no cabeçalho.
+function zip64Extra(values) {
+  const b = Buffer.alloc(4 + 8 * values.length);
+  b.writeUInt16LE(0x0001, 0);
+  b.writeUInt16LE(8 * values.length, 2);
+  values.forEach((v, i) => b.writeBigUInt64LE(BigInt(v), 4 + 8 * i));
+  return b;
+}
+
+// Nome da pasta dentro do zip e do próprio .zip, válido como nome de arquivo no Windows.
+function zipRootName(dir) {
+  let name = displayName(dir);
+  if (IS_WIN && isDriveRoot(dir)) name = `Disco ${dir[0]}`;
+  else if (IS_WIN && isUncRoot(dir)) name = dir.split('\\').filter(Boolean).pop();
+  else if (dir === '/') name = 'Raiz';
+  name = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '');
+  return name || 'Pasta';
+}
+
+// Percorre a pasta e as subpastas (por nome; em cada uma, os arquivos antes das subpastas) e
+// entrega as imagens e os vídeos com o caminho que terão dentro do zip. Segue atalhos e
+// junções, como a listagem, mas não entra num atalho que aponta para uma pasta de cima
+// (o que seria um laço sem fim). Se a própria pasta não puder ser lida, lança o erro;
+// subpastas sem acesso são anotadas em ctx.skipped e ficam de fora.
+async function* walkMedia(dir, prefix, ctx, ancestors = new Set()) {
+  let real = dir;
+  try { real = await fsp.realpath(dir); } catch { /* fica com o caminho recebido */ }
+  const key = IS_WIN ? real.toLowerCase() : real;
+  if (ancestors.has(key)) return;
+
+  const dirents = await fsp.readdir(dir, { withFileTypes: true });
+  const files = [];
+  const subdirs = [];
+  await mapLimit(dirents, 16, async (d) => {
+    if (ctx.aborted || isHidden(d.name, dir)) return;
+    const full = path.join(dir, d.name);
+    try {
+      let st = null;
+      let isDir = d.isDirectory();
+      let isFile = d.isFile();
+      if (d.isSymbolicLink()) {
+        st = await resolveLink(full);
+        isDir = st.isDirectory();
+        isFile = st.isFile();
+      }
+      if (isDir) { subdirs.push({ name: d.name, full }); return; }
+      if (!isFile || !mediaOf(d.name)) return;
+      st = st || (await fsp.stat(full));
+      files.push({ name: d.name, full, size: st.size, mtime: st.mtimeMs });
+    } catch {
+      // Item inacessível ou removido durante a leitura: também não aparece na listagem.
+    }
+  });
+  const byName = (a, b) => collator.compare(a.name, b.name);
+  files.sort(byName);
+  subdirs.sort(byName);
+
+  // Barra invertida é separador dentro do zip; só aparece em nomes fora do Windows.
+  const zipName = (name) => prefix + name.replace(/\\/g, '_');
+  for (const f of files) yield { ...f, zipName: zipName(f.name) };
+  ancestors.add(key);
+  try {
+    for (const s of subdirs) {
+      if (ctx.aborted) return;
+      try {
+        yield* walkMedia(s.full, `${zipName(s.name)}/`, ctx, ancestors);
+      } catch {
+        ctx.skipped.push(`${zipName(s.name)}/  (pasta sem acesso)`);
+      }
+    }
+  } finally {
+    ancestors.delete(key);
+  }
+}
+
+const ZIP_CHUNK = 1024 * 1024;  // leitura dos arquivos
+const ZIP_BATCH = 64 * 1024;    // pedaços menores (cabeçalhos, arquivos pequenos) vão juntos
+
+// Lê o arquivo em pedaços, sempre com a leitura do próximo já em andamento (o disco trabalha
+// enquanto a rede envia). Lê só até o tamanho visto na listagem: um arquivo que ainda está
+// sendo copiado para a pasta não muda o zip no meio do caminho.
+async function* readChunks(fh, size) {
+  const read = (pos) => {
+    const len = Math.min(ZIP_CHUNK, size - pos);
+    const p = fh.read(Buffer.allocUnsafe(len), 0, len, pos);
+    p.catch(() => {}); // o erro chega pelo await abaixo; sem isto, um download cancelado derrubaria o servidor
+    return p;
+  };
+  let pos = 0;
+  let pending = size > 0 ? read(0) : null;
+  try {
+    while (pending) {
+      const { bytesRead, buffer } = await pending;
+      pending = null;
+      if (!bytesRead) return; // o arquivo diminuiu
+      pos += bytesRead;
+      if (pos < size) pending = read(pos);
+      yield bytesRead < buffer.length ? buffer.subarray(0, bytesRead) : buffer;
+    }
+  } finally {
+    if (pending) await pending.catch(() => {}); // o arquivo só é fechado depois da última leitura
+  }
+}
+
+// Escreve o zip na resposta no ritmo de quem baixa. Se o download for cancelado, as
+// escritas lançam CANCELLED.
+function createZipWriter(res, ctx) {
+  let offset = 0;
+  const entries = [];
+  const closed = once(res, 'close').catch(() => {});
+  let batch = [];
+  let batchSize = 0;
+
+  async function send(buf) {
+    if (!res.write(buf)) await Promise.race([once(res, 'drain'), closed]);
+  }
+  async function flush() {
+    if (!batchSize) return;
+    const buf = batch.length === 1 ? batch[0] : Buffer.concat(batch, batchSize);
+    batch = [];
+    batchSize = 0;
+    await send(buf);
+  }
+  async function out(buf) {
+    if (ctx.aborted) throw CANCELLED;
+    offset += buf.length;
+    if (buf.length >= ZIP_BATCH) {
+      await flush();
+      await send(buf);
+      return;
+    }
+    batch.push(buf);
+    batchSize += buf.length;
+    if (batchSize >= ZIP_BATCH) await flush();
+  }
+
+  // Uma entrada: cabeçalho, dados (os pedaços de "chunks", sem compressão) e o descritor com
+  // o CRC e o tamanho, que só são conhecidos no fim. "big": arquivo de 4 GB ou mais (ZIP64).
+  // Devolve false se a leitura falhou no meio: o que foi lido fica, e o zip continua válido.
+  async function add(name, mtimeMs, big, chunks) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const { date, time } = dosDateTime(mtimeMs);
+    const extra = big ? zip64Extra([0, 0]) : Buffer.alloc(0);
+    const head = Buffer.alloc(30);
+    head.writeUInt32LE(0x04034b50, 0);
+    head.writeUInt16LE(big ? 45 : 20, 4); // versão necessária para extrair
+    head.writeUInt16LE(ZIP_FLAGS, 6);
+    head.writeUInt16LE(0, 8); // sem compressão
+    head.writeUInt16LE(time, 10);
+    head.writeUInt16LE(date, 12);
+    // CRC e tamanhos (bytes 14 a 25) ficam zerados: vão no descritor, depois dos dados.
+    head.writeUInt16LE(nameBuf.length, 26);
+    head.writeUInt16LE(extra.length, 28);
+    const start = offset;
+    await out(head);
+    await out(nameBuf);
+    if (extra.length) await out(extra);
+
+    let crc = 0;
+    let size = 0;
+    let ok = true;
+    try {
+      for await (const chunk of chunks) {
+        crc = crc32(chunk, crc);
+        size += chunk.length;
+        await out(chunk);
+      }
+    } catch (e) {
+      if (e === CANCELLED || ctx.aborted) throw CANCELLED;
+      ok = false;
+    }
+
+    const desc = Buffer.alloc(big ? 24 : 16);
+    desc.writeUInt32LE(0x08074b50, 0);
+    desc.writeUInt32LE(crc, 4);
+    if (big) {
+      desc.writeBigUInt64LE(BigInt(size), 8);
+      desc.writeBigUInt64LE(BigInt(size), 16);
+    } else {
+      desc.writeUInt32LE(size, 8);
+      desc.writeUInt32LE(size, 12);
+    }
+    await out(desc);
+    entries.push({ nameBuf, date, time, crc, size, big, offset: start });
+    return ok;
+  }
+
+  // Diretório central (o índice que os programas leem para abrir o zip) e o registro final.
+  async function finish() {
+    const cdStart = offset;
+    for (const e of entries) {
+      const bigOffset = e.offset >= ZIP_MAX32;
+      const values = e.big ? [e.size, e.size] : [];
+      if (bigOffset) values.push(e.offset);
+      const extra = values.length ? zip64Extra(values) : Buffer.alloc(0);
+      const h = Buffer.alloc(46);
+      h.writeUInt32LE(0x02014b50, 0);
+      h.writeUInt16LE(45, 4); // criado por: MS-DOS/Windows, especificação 4.5
+      h.writeUInt16LE(values.length ? 45 : 20, 6);
+      h.writeUInt16LE(ZIP_FLAGS, 8);
+      h.writeUInt16LE(0, 10);
+      h.writeUInt16LE(e.time, 12);
+      h.writeUInt16LE(e.date, 14);
+      h.writeUInt32LE(e.crc, 16);
+      h.writeUInt32LE(e.big ? ZIP_MAX32 : e.size, 20);
+      h.writeUInt32LE(e.big ? ZIP_MAX32 : e.size, 24);
+      h.writeUInt16LE(e.nameBuf.length, 28);
+      h.writeUInt16LE(extra.length, 30);
+      h.writeUInt32LE(bigOffset ? ZIP_MAX32 : e.offset, 42);
+      await out(h);
+      await out(e.nameBuf);
+      if (extra.length) await out(extra);
+    }
+
+    const cdSize = offset - cdStart;
+    const count = entries.length;
+    if (count >= 0xffff || cdStart >= ZIP_MAX32 || cdSize >= ZIP_MAX32) {
+      // Registro final ZIP64 e o localizador dele.
+      const z = Buffer.alloc(56 + 20);
+      z.writeUInt32LE(0x06064b50, 0);
+      z.writeBigUInt64LE(44n, 4); // tamanho do restante do registro
+      z.writeUInt16LE(45, 12);
+      z.writeUInt16LE(45, 14);
+      z.writeBigUInt64LE(BigInt(count), 24);
+      z.writeBigUInt64LE(BigInt(count), 32);
+      z.writeBigUInt64LE(BigInt(cdSize), 40);
+      z.writeBigUInt64LE(BigInt(cdStart), 48);
+      z.writeUInt32LE(0x07064b50, 56);
+      z.writeBigUInt64LE(BigInt(offset), 64);
+      z.writeUInt32LE(1, 72); // total de discos
+      await out(z);
+    }
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(Math.min(count, 0xffff), 8);
+    end.writeUInt16LE(Math.min(count, 0xffff), 10);
+    end.writeUInt32LE(Math.min(cdSize, ZIP_MAX32), 12);
+    end.writeUInt32LE(Math.min(cdStart, ZIP_MAX32), 16);
+    await out(end);
+    await flush();
+    res.end();
+  }
+
+  return { add, finish };
+}
+
+async function apiZip(req, res, raw, check) {
+  const dir = normalizePath(raw);
+  if (!dir) return sendError(res, 400, 'invalid', 'Caminho inválido.');
+  // Só a própria interface (ou o endereço colado na barra do Chrome) pode pedir: uma página
+  // de outro site não consegue fazer o navegador ler uma pasta inteira daqui.
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return sendError(res, 403, 'forbidden', 'Requisição recusada.');
+
+  const ctx = { aborted: false, skipped: [] };
+  res.on('close', () => { if (!res.writableFinished) ctx.aborted = true; });
+  const root = zipRootName(dir);
+  const filename = `${root}.zip`;
+  const files = walkMedia(dir, `${root}/`, ctx);
+
+  // Procura o primeiro arquivo antes de responder: pasta vazia ou sem acesso vira uma
+  // mensagem na interface (o "check" é feito antes de baixar), e não um download com erro.
+  let next;
+  try {
+    next = await files.next();
+  } catch (e) {
+    const [status, code, message] = fsErrorInfo(e);
+    return sendError(res, status, code, message);
+  }
+  if (next.done) return sendError(res, 404, 'empty', 'Não há imagens nem vídeos nesta pasta nem nas subpastas dela.');
+  if (check) {
+    await files.return();
+    return sendJson(res, 200, { name: filename });
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'application/zip',
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeFilename(filename)}`,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.flushHeaders(); // o Chrome já mostra o download, mesmo se o disco demorar a responder
+  if (req.method === 'HEAD') {
+    await files.return();
+    return res.end();
+  }
+  const zip = createZipWriter(res, ctx);
+  try {
+    for (; !next.done; next = await files.next()) {
+      const f = next.value;
+      let fh;
+      try {
+        fh = await fsp.open(f.full, 'r');
+      } catch {
+        ctx.skipped.push(f.zipName);
+        continue;
+      }
+      try {
+        if (!(await zip.add(f.zipName, f.mtime, f.size >= ZIP_MAX32, readChunks(fh, f.size)))) {
+          ctx.skipped.push(`${f.zipName}  (incompleto: erro de leitura)`);
+        }
+      } finally {
+        await fh.close().catch(() => {});
+      }
+    }
+    if (ctx.skipped.length) {
+      const text = [
+        'Estes itens não puderam ser lidos (sem permissão, em uso por outro programa ou',
+        'removidos durante o download) e ficaram de fora deste arquivo .zip:',
+        '',
+        ...ctx.skipped,
+        '',
+      ].join('\r\n');
+      await zip.add(`${root}/${ZIP_SKIPPED_NAME}`, Date.now(), false, [Buffer.from(`\ufeff${text}`, 'utf8')]);
+    }
+    await zip.finish();
+  } catch (e) {
+    if (e !== CANCELLED) console.warn('[aviso] Baixar pasta:', e.message);
+    // Sem isto, um erro no meio deixaria um zip cortado parecendo completo; assim o Chrome
+    // mostra o download como "falhou".
+    res.destroy();
+  } finally {
+    files.return().catch(() => {});
+  }
+  return undefined;
+}
+
 let picking = false;
 
 async function apiPick(req, res) {
@@ -1175,6 +1547,8 @@ async function handleApi(req, res, url) {
       return apiFile(req, res, q.get('path'), q.get('download') === '1');
     case 'thumb':
       return apiThumb(req, res, q.get('path'));
+    case 'zip':
+      return apiZip(req, res, q.get('path'), q.get('check') === '1');
     default:
       return sendError(res, 404, 'not_found', 'Rota desconhecida.');
   }

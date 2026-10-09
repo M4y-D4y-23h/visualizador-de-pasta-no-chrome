@@ -52,6 +52,10 @@ A cada inicialização o `.bat` verifica tudo de que o visualizador precisa:
   segundos: os tamanhos vão aparecendo nos cartões e a ordem é refeita quando todos ficam prontos.
   Um "≥" antes do tamanho indica que alguma subpasta não pôde ser lida (sem permissão).
 - **Visualizar:** clique em um arquivo. Use **← →** para passar pelos arquivos da pasta.
+- **Baixar uma pasta inteira:** com um clique em **Baixar tudo**, no topo da pasta, vem um `.zip`
+  com todas as imagens e vídeos dela e das subpastas, na mesma organização de pastas. Para baixar
+  uma subpasta sem entrar nela, passe o mouse sobre o cartão dela e clique no botão de download
+  no canto da capa. Veja [Baixar pastas](#baixar-pastas).
 - **Voltar:** **Backspace** ou o **botão direito do mouse** voltam um nível (do arquivo para a
   pasta, da pasta para a de cima). O botão Voltar do Chrome e apagar o último trecho da URL também
   funcionam. Para ver o menu normal do Chrome, use **Shift + botão direito**.
@@ -98,6 +102,22 @@ Somente pastas, **imagens** e **vídeos** aparecem; os demais arquivos são igno
 HEIC, TIFF, AVI, WMV, FLV, MPEG, 3GP e MTS também aparecem na lista, mas o Chrome não consegue
 exibi-los; para esses, o visualizador oferece **Abrir no aplicativo padrão** do Windows.
 (TIFF ganha miniatura na grade quando o sharp está instalado.)
+
+## Baixar pastas
+
+- O `.zip` é montado enquanto é baixado: o download começa na hora, mesmo em pastas enormes, e
+  nada é gravado no computador que tem os arquivos. Como o tamanho final só é conhecido no fim, o
+  Chrome mostra quanto já foi baixado, mas não o total.
+- Entram as imagens e os vídeos de todos os níveis de subpastas (os mesmos arquivos que o
+  visualizador mostra; outros arquivos e itens ocultos ou de sistema ficam de fora). As pastas
+  sem imagens nem vídeos não aparecem no `.zip`.
+- Os arquivos não são comprimidos de novo (fotos e vídeos já são comprimidos), então o download
+  vai na velocidade do disco ou da rede. Vídeos acima de 4 GB e pastas com milhares de arquivos
+  funcionam normalmente.
+- Se algum arquivo não puder ser lido (sem permissão, aberto por outro programa ou apagado durante
+  o download), ele fica de fora e o `.zip` traz um `ARQUIVOS NÃO INCLUÍDOS.txt` com a lista.
+- Pastas vazias ou sem acesso não mostram o botão; se não houver nenhuma imagem ou vídeo dentro,
+  aparece um aviso em vez do download.
 
 ## Velocidade das miniaturas
 
@@ -164,7 +184,8 @@ deve vê-los.
 
 No outro computador, **Escolher pasta…**, **Abrir no aplicativo padrão** e **Mostrar no Explorer**
 não aparecem, porque abririam janelas no computador remoto. Navegue pela barra lateral ou cole um
-caminho; para formatos que o Chrome não exibe (HEIC, AVI…), use **Baixar**.
+caminho; para formatos que o Chrome não exibe (HEIC, AVI…), use **Baixar**. Para trazer uma pasta
+inteira para o outro computador, use **Baixar tudo** (veja [Baixar pastas](#baixar-pastas)).
 
 **Não abre no outro computador?**
 

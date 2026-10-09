@@ -34,6 +34,8 @@ export const api = {
   list: (p, signal) => request('/@api/list?path=' + q(p), { signal }),
   peek: (p) => request('/@api/peek?path=' + q(p)),
   dirSize: (p, refresh, signal) => request('/@api/dirsize?path=' + q(p) + (refresh ? '&refresh=1' : ''), { signal }),
+  // Confere se há o que baixar (e se a pasta abre) antes de iniciar o download do .zip.
+  zipCheck: (p) => request('/@api/zip?check=1&path=' + q(p)),
   pick: (initial) => post('/@api/pick', { initial }),
   open: (p) => post('/@api/open', { path: p, action: 'open' }),
   reveal: (p) => post('/@api/open', { path: p, action: 'reveal' }),
@@ -43,3 +45,5 @@ export const api = {
 export const fileSrc = (f) => `/@api/file?path=${q(f.path)}&v=${f.mtime}-${f.size}`;
 // Miniatura feita pelo servidor (quando o arquivo tem "thumb").
 export const thumbSrc = (f) => `/@api/thumb?path=${q(f.path)}&v=${f.mtime}-${f.size}`;
+// .zip com as imagens e os vídeos da pasta e de todas as subpastas.
+export const zipSrc = (p) => `/@api/zip?path=${q(p)}`;
